@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
 
 # Windows 终端可能使用 GBK/CP936 编码，强制 stdout/stderr 为 UTF-8 避免 emoji 崩溃
@@ -32,29 +33,61 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-WORKBUDDY_DIR = Path.home() / ".workbuddy"
+def _find_workbuddy_dir():
+    """自动探测数据目录：国际版用 ~/.workbuddy-ai，国内版用 ~/.workbuddy"""
+    ai_dir = Path.home() / ".workbuddy-ai"
+    # 目录存在且非空即视为国际版（不依赖 DB 是否已生成）
+    if ai_dir.is_dir() and any(ai_dir.iterdir()):
+        return ai_dir
+    return Path.home() / ".workbuddy"
+
+
+def _get_storage_json_path():
+    """storage.json 候选路径：仅返回确实存在的路径，否则返回 None
+
+    国内版登录态权威来源。国际版不使用此文件（改用 account-snapshot.json）。
+    """
+    import platform
+    system = platform.system()
+    candidates = []
+    if system == "Darwin":
+        candidates.append(Path.home() / "Library" / "Application Support" / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA", "")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        candidates.append(base / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
+    else:
+        config_home = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        candidates.append(Path(config_home) / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _set_workbuddy_dir(path):
+    """设置数据目录并重算所有派生路径（供 --dir 覆盖时调用）"""
+    global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR
+    global STORAGE_JSON, ACCOUNT_SNAPSHOT, BACKUP_DIR
+    WORKBUDDY_DIR = Path(path).expanduser()
+    DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
+    MEMORY_DIR = WORKBUDDY_DIR / "memory"
+    CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
+    TASKS_DIR = WORKBUDDY_DIR / "tasks"
+    STORAGE_JSON = _get_storage_json_path()
+    ACCOUNT_SNAPSHOT = WORKBUDDY_DIR / "storage" / "skeleton" / "account-snapshot.json"
+    BACKUP_DIR = WORKBUDDY_DIR / "migrate_backups"
+
+
+WORKBUDDY_DIR = _find_workbuddy_dir()
 DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
 MEMORY_DIR = WORKBUDDY_DIR / "memory"
 CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
 TASKS_DIR = WORKBUDDY_DIR / "tasks"
-
-# storage.json 路径：跨平台支持
-def _get_storage_json_path():
-    import platform
-    system = platform.system()
-    if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "WorkBuddy" / "User" / "globalStorage" / "storage.json"
-    elif system == "Windows":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            return Path(appdata) / "WorkBuddy" / "User" / "globalStorage" / "storage.json"
-        return Path.home() / "AppData" / "Roaming" / "WorkBuddy" / "User" / "globalStorage" / "storage.json"
-    else:
-        # Linux / 其他
-        config_home = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-        return Path(config_home) / "WorkBuddy" / "User" / "globalStorage" / "storage.json"
-
 STORAGE_JSON = _get_storage_json_path()
+
+# 国际版登录态权威来源：account-snapshot.json 的 primary.uid
+ACCOUNT_SNAPSHOT = WORKBUDDY_DIR / "storage" / "skeleton" / "account-snapshot.json"
 
 # 备份目录
 BACKUP_DIR = WORKBUDDY_DIR / "migrate_backups"
@@ -64,24 +97,35 @@ def get_current_user_id():
     """获取当前登录的 user_id
 
     优先级策略：
-    1. 从 storage.json 的 genie.userId 读取（登录态的权威来源）
-    2. 从 workbuddy.db 中 session 数量最多的 user_id 推断（辅助验证）
-    3. 如果两者不一致，优先使用 storage.json，并发出警告
+    1. 从 storage.json 的 genie.userId 读取（国内版，登录态权威来源）
+    2. 国际版从 account-snapshot.json 的 primary.uid 读取（登录态权威来源）
+    3. 从 workbuddy.db 中 session 数量最多的 user_id 推断（辅助验证）
+    4. 如果上述来源不一致，优先使用登录态权威来源，并发出警告
 
     ⚠️  注意：不能用"最新 session"来判断当前账号！
     因为旧账号在切换前的最后一条 session 可能比当前账号的 session 更新，
     导致误把旧账号当成当前账号。
     """
     db_uid = ""
-    storage_uid = ""
+    login_uid = ""
 
-    # 方法1：从 storage.json 读取（最权威，代表实际登录状态）
+    # 方法1a：从 storage.json 读取（国内版，登录态权威来源）
     try:
         with open(STORAGE_JSON, encoding="utf-8") as f:
             data = json.load(f)
-        storage_uid = data.get("genie.userId", "")
+        login_uid = data.get("genie.userId", "")
     except Exception:
         pass
+
+    # 方法1b：国际版 account-snapshot.json（登录态权威来源）
+    if not login_uid and ACCOUNT_SNAPSHOT.exists():
+        try:
+            with open(ACCOUNT_SNAPSHOT, encoding="utf-8") as f:
+                data = json.load(f)
+            primary = data.get("primary", {})
+            login_uid = primary.get("uid", "")
+        except Exception:
+            pass
 
     # 方法2：从 DB 推断——用 session 数量最多的 user_id（而非最新 session）
     # 避免被偶发的旧账号 session 欺骗
@@ -101,20 +145,20 @@ def get_current_user_id():
             pass
 
     # 交叉验证
-    if storage_uid and db_uid and storage_uid != db_uid:
+    if login_uid and db_uid and login_uid != db_uid:
         print(f"⚠️  检测到 user_id 不一致！")
-        print(f"   storage.json (genie.userId): {storage_uid}")
+        print(f"   登录态 (storage.json / account-snapshot.json): {login_uid}")
         print(f"   DB session 数最多的 user_id: {db_uid}")
-        print(f"   → 优先使用 storage.json 的 user_id（登录态权威）: {storage_uid}")
+        print(f"   → 优先使用登录态 user_id（登录态权威）: {login_uid}")
         print()
 
-    if storage_uid:
-        return storage_uid
+    if login_uid:
+        return login_uid
 
     if db_uid:
         return db_uid
 
-    print("❌ 无法获取当前 user_id（storage.json 和 DB 均无数据）")
+    print("❌ 无法获取当前 user_id（storage.json / account-snapshot.json 和 DB 均无数据）")
     return ""
 
 
@@ -329,8 +373,23 @@ def migrate_sessions(source_uid, target_uid):
     return migrated
 
 
+RAW_JSON_RE = re.compile(r"<!--\s*RAW_JSON_START(.*?)RAW_JSON_END\s*-->", re.DOTALL)
+
+
+def _extract_memory_block(content):
+    """从 memory 文件中提取 memoryBlock 内容，解析失败返回 None"""
+    m = RAW_JSON_RE.search(content)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1).strip())
+        return data.get("memoryBlock", "")
+    except Exception:
+        return None
+
+
 def migrate_memory(source_uid, target_uid):
-    """迁移 Memory 文件（追加合并）"""
+    """迁移 Memory 文件（追加合并，语义块级去重）"""
     src_file = MEMORY_DIR / f"{source_uid}_memory.md"
     dst_file = MEMORY_DIR / f"{target_uid}_memory.md"
 
@@ -352,8 +411,25 @@ def migrate_memory(source_uid, target_uid):
 
     # 目标已存在，追加去重
     dst_content = dst_file.read_text(encoding="utf-8").strip()
+    src_block = _extract_memory_block(src_content)
+    dst_block = _extract_memory_block(dst_content)
 
-    # 按行去重
+    if src_block is not None and dst_block is not None:
+        # 结构化 memory：按 memoryBlock 语义块去重（避免空模板按行误追加）
+        if not src_block.strip():
+            print(f"  ⏭️  源账号 Memory 为空模板，跳过")
+            return
+        if src_block == dst_block:
+            print(f"  ⏭️  源/目标 Memory 的 memoryBlock 相同，跳过")
+            return
+        # 追加源文件的 RAW_JSON 语义块（完整注释块，保持 Markdown 合法）
+        m = RAW_JSON_RE.search(src_content)
+        with open(dst_file, "a", encoding="utf-8") as f:
+            f.write(f"\n\n---\n## 迁移自 {source_uid[:12]}...\n\n{m.group(0)}\n")
+        print(f"  ✅ 追加源账号 Memory 语义块")
+        return
+
+    # 旧格式/无 RAW_JSON：退回按行去重
     src_lines = src_content.split("\n")
     dst_lines_set = set(dst_content.split("\n"))
     new_lines = [l for l in src_lines if l.strip() and l not in dst_lines_set]
@@ -425,10 +501,11 @@ def migrate_connectors(source_uid, target_uid):
             print(f"  ✅ 复制 {fname}（目标不存在）")
 
 
-def migrate(source_uid, target_uid=None, skip_confirm=False):
+def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=False):
     """执行完整迁移流程
 
-    target_uid: 目标账号 ID。如果为 None，则自动从 storage.json/DB 推断。
+    target_uid: 目标账号 ID。如果为 None，则自动从登录态（storage.json / account-snapshot.json）推断。
+    target_is_manual: 目标账号是否由用户手动指定（--target 或交互向导），用于打印区分。
     """
     if target_uid is None:
         target_uid = get_current_user_id()
@@ -447,7 +524,8 @@ def migrate(source_uid, target_uid=None, skip_confirm=False):
     print("WorkBuddy 账号迁移")
     print("=" * 70)
     print(f"\n  源账号:   {source_uid}")
-    print(f"  目标账号: {target_uid} (当前登录)")
+    target_label = "手动指定" if target_is_manual else "当前登录"
+    print(f"  目标账号: {target_uid} ({target_label})")
     print()
 
     # Phase 1: 诊断
@@ -642,7 +720,7 @@ def interactive_migrate():
     print(f"\n  源账号:   {source_uid[:20]}... ({session_counts.get(source_uid, 0)} sessions)")
     print(f"  目标账号: {target_uid[:20]}... ({session_counts.get(target_uid, 0)} sessions)")
     print()
-    migrate(source_uid, target_uid=target_uid)
+    migrate(source_uid, target_uid=target_uid, target_is_manual=True)
 
 
 def get_task_stats():
@@ -961,9 +1039,10 @@ def generate_task_create_commands(target_session_id=None):
 
 def main():
     parser = argparse.ArgumentParser(description="WorkBuddy 账号迁移工具")
+    parser.add_argument("--dir", type=str, help="WorkBuddy 数据目录（默认自动探测：~/.workbuddy-ai 或 ~/.workbuddy）")
     parser.add_argument("--diagnose", "-d", action="store_true", help="诊断模式：查看所有账号数据分布")
     parser.add_argument("--source", "-s", type=str, help="源账号 user_id（要迁移出的账号）")
-    parser.add_argument("--target", "-t", type=str, help="目标账号 user_id（接收数据的账号，默认从 storage.json 自动推断）")
+    parser.add_argument("--target", "-t", type=str, help="目标账号 user_id（接收数据的账号，默认从登录态 storage.json / account-snapshot.json 自动推断）")
     parser.add_argument("--yes", "-y", action="store_true", help="跳过确认直接迁移")
     parser.add_argument("--rollback", "-r", type=str, help="回滚到指定备份标签")
     parser.add_argument("--restore-tasks", action="store_true", help="恢复历史任务到当前 session")
@@ -972,6 +1051,9 @@ def main():
     parser.add_argument("--generate-commands", action="store_true", help="生成 TaskCreate 命令（与 --restore-tasks 配合使用）")
 
     args = parser.parse_args()
+
+    if args.dir:
+        _set_workbuddy_dir(args.dir)
 
     if args.diagnose:
         diagnose()
@@ -985,7 +1067,7 @@ def main():
         else:
             restore_tasks(target_session_id=args.session, skip_confirm=args.yes)
     elif args.source:
-        migrate(args.source, target_uid=args.target, skip_confirm=args.yes)
+        migrate(args.source, target_uid=args.target, skip_confirm=args.yes, target_is_manual=args.target is not None)
     else:
         # 无参数时进入交互式向导
         interactive_migrate()
