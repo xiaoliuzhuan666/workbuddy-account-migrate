@@ -404,7 +404,8 @@ def migrate_memory(source_uid, target_uid):
         return
 
     if not dst_file.exists():
-        # 目标不存在，直接复制
+        # 目标不存在，直接复制（memory 目录本身也可能不存在，如国际版新装环境）
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
         dst_file.write_text(src_content, encoding="utf-8")
         print(f"  ✅ 复制 Memory（目标为空，直接复制 {len(src_content)} 字符）")
         return
@@ -617,22 +618,29 @@ def rollback(backup_tag):
         shutil.copy2(str(db_backup), str(DB_PATH))
         print("  ✅ 已恢复数据库")
 
-    # 恢复 Memory
-    if target_uid:
+    # 恢复 Memory / Connectors
+    # ⚠️ 安全守卫：target_uid 为空时，`backup_path / target_uid` 会退化为备份目录本身、
+    #    `CONNECTORS_DIR / target_uid` 会退化为整个 connectors 目录，任何 rmtree/copytree
+    #    都会误删或覆盖目录级数据（守卫思路来自 @bukall PR #5）
+    if not target_uid:
+        print("  ⚠️  备份缺少目标账号信息（meta.json 不完整），跳过 Memory / Connectors 恢复")
+        print("     （target_uid 为空时路径会退化成整个目录，不能做任何删除操作）")
+    else:
+        # 恢复 Memory：只要备份里有就恢复，不要求目标文件当前必须存在
         mem_backup = backup_path / f"{target_uid}_memory.md"
-        mem_target = MEMORY_DIR / f"{target_uid}_memory.md"
-        if mem_backup.exists() and mem_target.exists():
-            shutil.copy2(str(mem_backup), str(mem_target))
+        if mem_backup.exists():
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(mem_backup), str(MEMORY_DIR / f"{target_uid}_memory.md"))
             print("  ✅ 已恢复 Memory")
 
-    # 恢复 Connectors
-    conn_backup = backup_path / target_uid
-    conn_target = CONNECTORS_DIR / target_uid
-    if conn_backup.exists() and conn_target.exists():
-        if conn_target.exists():
-            shutil.rmtree(str(conn_target))
-        shutil.copytree(str(conn_backup), str(conn_target))
-        print("  ✅ 已恢复 Connectors")
+        # 恢复 Connectors：同样只看备份里有没有
+        conn_backup = backup_path / target_uid
+        conn_target = CONNECTORS_DIR / target_uid
+        if conn_backup.exists():
+            if conn_target.exists():
+                shutil.rmtree(str(conn_target))
+            shutil.copytree(str(conn_backup), str(conn_target))
+            print("  ✅ 已恢复 Connectors")
 
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 
