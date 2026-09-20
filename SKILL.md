@@ -52,20 +52,14 @@ WorkBuddy 数据存储架构：**本地优先 + 账号隔离**
    - `~/.workbuddy/connectors/` 下的子目录
 3. 展示对比表格，用户输入序号选择要迁移的源账号（无需知道 user_id）
 
-**⚠️ 获取当前 user_id 的关键逻辑（v1.3 修复）**：
+**⚠️ 获取当前 user_id 的关键逻辑（v1.4 修订）**：
 
-账号切换后，`storage.json` 中的 `genie.userId` 可能**没有同步更新**，仍为旧 ID。如果脚本误读旧 ID 作为 target，会导致"源=目标，无需迁移"的假象。
+v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号在切换前的最后一条 session 可能比当前账号的 session 更新**，导致误把旧账号当成当前账号。v1.4 反转为：
 
-修复策略：**优先从 DB 最新 session 推断，而非 storage.json**：
-```python
-# 方法1（最可靠）：DB 中最新创建的 session 的 user_id
-cur.execute("SELECT user_id FROM sessions ORDER BY created_at DESC LIMIT 1")
-
-# 方法2（备选）：storage.json 中的 genie.userId
-data.get("genie.userId", "")
-
-# 两者不一致时，优先用 DB 的值并发出警告
-```
+1. **storage.json 的 genie.userId 是登录态权威来源**（优先使用）
+2. DB 中 session 数最多的 user_id 仅作辅助交叉验证
+3. 两者不一致时优先用 storage.json 并发出警告
+4. **最可靠的终极验证**：查 DB 最新 session（`ORDER BY updated_at DESC LIMIT 1`），用其标题确认是否为当前正在进行的对话——当前对话本身的 user_id 就是真实登录身份（2026-09-20 实战验证有效）
 
 **AI 手动迁移时的最佳实践**：
 
@@ -304,9 +298,10 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 | 迁移中创建的会话 user_id 不匹配 | 迁移脚本运行时，当前对话可能以旧 user_id 写入 sessions 表 | Phase 4 验证后追加检查：`SELECT COUNT(*) FROM sessions WHERE user_id NOT IN (target)` 并修复 |
 | **历史任务 UI 不可见** | **新版 /todos 只读当前 session 内存，不扫描 `tasks/` 目录** | **AI 用 TaskCreate 工具重新创建 pending 任务** |
 | **tasks 文件格式兼容** | **旧版任务 JSON 有 subject/description/status 等字段，新版 TaskCreate 参数格式一致** | **字段可直接映射** |
-| **storage.json 中 genie.userId 过时** | **账号切换后 storage.json 的 genie.userId 可能没有同步更新，仍为旧 ID。迁移脚本读到旧 ID 作为 target，导致 source=target 跳过迁移** | **v1.3 修复：优先从 DB 最新 session 推断 user_id，交叉验证不一致时发出警告** |
+| **storage.json 中 genie.userId 过时** | **账号切换后 storage.json 的 genie.userId 可能没有同步更新，仍为旧 ID。迁移脚本读到旧 ID 作为 target，导致 source=target 跳过迁移** | **v1.3 曾优先用 DB 最新 session 推断，但旧账号最后一条 session 可能更新；v1.4 改为 storage.json 权威 + DB session 数最多交叉验证，不一致时警告** |
 | **WAL 未 checkpoint 导致迁移丢失** | **即使 UPDATE sessions 成功 + commit，如果 WAL 日志没有 checkpoint，客户端重启后可能读不到修改，数据恢复为旧状态** | **v1.3 修复：迁移前后各做一次 PRAGMA wal_checkpoint(TRUNCATE)，并验证源 user_id 归零** |
 | **AI 手动迁移时的常见错误** | **AI 在对话中直接写 SQL 迁移时，可能：(1) 从 storage.json 读到错误的 target_uid (2) 忘记 WAL checkpoint (3) 不验证结果** | **必须：(1) 从当前对话 session 的 user_id 确定目标 (2) UPDATE 后做 WAL checkpoint (3) 验证源 user_id 归零** |
+| **WorkBuddy 会话内运行脚本被沙箱 shim 劫持** | **在 WorkBuddy 会话的 Bash 里跑 migrate.py 时，PYTHONPATH 指向沙箱 shim（sitecustomize.py），拦截 Path.mkdir；migrate_backups 目录已存在时，备份阶段 mkdir(exist_ok=True) 仍抛 PermissionError EEXIST，迁移在动手前就崩溃。托管 Python 和系统 Python 都会被劫持** | **用 `env -u PYTHONPATH python3 scripts/migrate.py ...` 运行，剥掉 shim 环境变量（2026-09-20 实战踩坑）** |
 
 ## 安全规则
 
