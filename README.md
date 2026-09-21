@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.6.0](https://img.shields.io/badge/Version-1.6.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.6.1](https://img.shields.io/badge/Version-1.6.1-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -219,9 +219,10 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 
 回滚精确到单条，不影响其他对话：`python3 scripts/migrate_session.py --rollback <TAG>`。
 
-> ⚠️ **平台说明**：单对话迁移**仅 Windows 实测通过**（Windows 11 + Python 3.13）。
-> macOS / Linux 的路径逻辑沿用 `migrate.py` 的跨平台实现（路径走 pathlib、进程检测
-> Windows 用 `tasklist`、其他平台用 `ps`），但未经实测，欢迎提 Issue 反馈。
+> ⚠️ **平台说明**：单对话迁移的**完整跨版本链路仅 Windows 实测通过**（Windows 11 + Python 3.13）。
+> macOS 已部分验证（2026-09-21）：`--list` 在国内版真实数据 fixture 上工作正常（含中文名渲染、
+> 大小统计），脚本本身是跨平台的（路径走 pathlib、进程检测 Windows 用 `tasklist`、其他平台用
+> `ps`），但跨版本迁移全流程在 macOS / Linux 未经实测，欢迎提 Issue 反馈。
 
 ### 工作原理
 
@@ -262,7 +263,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 ### 回滚
 
 ```bash
-ls ~/.workbuddy/migrate_backups/
+ls ~/.workbuddy/migrate_backups/          # 国内版（国际版在 ~/.workbuddy-ai/migrate_backups/）
 python3 scripts/migrate.py --rollback 20260525170000_abc12345
 ```
 
@@ -299,6 +300,14 @@ A: 暂不支持。CodeBuddy CLI 不存在账号切换数据丢失的问题。详
 
 A: 可以。v1.4 起 storage.json 路径已按平台自动适配（macOS `~/Library/Application Support/...`、Windows `%APPDATA%`、Linux `XDG_CONFIG_HOME`）。
 
+**Q: 在 WorkBuddy / AI 助手的会话里运行脚本报错 `PermissionError: [Errno 13]` / mkdir 异常？**
+
+A: 部分 AI 助手的会话内 Shell 会通过 `PYTHONPATH` 注入沙箱 shim（如 sitecustomize.py），劫持所有 Python 进程的文件操作——备份目录已存在时 `mkdir(exist_ok=True)` 也会抛异常，迁移还没开始就崩（2026-09-20 实战踩坑，SKILL.md 有记录）。解法是剥掉该变量运行（脚本仅用标准库，不需要它）：
+
+```bash
+env -u PYTHONPATH python3 scripts/migrate.py
+```
+
 ### 项目结构
 
 ```
@@ -320,9 +329,10 @@ workbuddy-account-migrate/
 > 测试全部在临时 fixture 中运行，不会触碰真实数据目录。
 > `python3 tests/run_tests.py` 即可复现全部验证。
 >
-> ⚠️ **测试脚本仅 Windows 实测通过**（Windows 11 + Python 3.13）。fixture 复制的是本机真实
-> WorkBuddy 数据，其中 session 的 cwd 与 projects 目录名均为 Windows 路径格式。
-> macOS / Linux 未测试：本机若未安装并登录过 WorkBuddy，将造不出 fixture。
+> ⚠️ **完整跨版本测试链仅 Windows 实测通过**（Windows 11 + Python 3.13）。fixture 复制的是本机
+> 真实 WorkBuddy 数据，跨版本测试用例要求本机**同时有国内版和国际版**数据（fixture 缺某版目录
+> 时会如实跳过并报告）。macOS 实测：仅有国内版数据时 fixture 只能造出 domestic 一半，
+> `run_tests.py` 会因缺少国际版库中止——这是环境限制而非脚本缺陷。
 
 ### 贡献
 
@@ -343,7 +353,7 @@ workbuddy-account-migrate/
 
 #### v1.6.0 (2026-09-10)
 
-**新增：`scripts/migrate_session.py` — 单对话跨版本迁移**
+**新增：`scripts/migrate_session.py` — 单对话跨版本迁移**（本节主体来自 [@bukall](https://github.com/bukall)，PR #5）
 
 只迁移**指定的一个对话**，并支持**国内版 ⇄ 国际版**双向：
 
@@ -380,14 +390,14 @@ workbuddy-account-migrate/
 
 **改进：原有 `scripts/migrate.py`**
 
-- 当前账号识别：国内版继续以平台 `storage.json` 的 `genie.userId` 为权威；国际版使用数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid`（跨平台路径统一，不依赖 `%APPDATA%` 探测）；两者都取不到时回落 DB 中 session 数最多的 `user_id`（与上游 #6 策略一致）
+- 当前账号识别：国内版继续以平台 `storage.json` 的 `genie.userId` 为权威；国际版使用数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid`（跨平台路径统一，不依赖 `%APPDATA%` 探测，来自 [@fhjowe](https://github.com/fhjowe)，PR #6）；两者都取不到时回落 DB 中 session 数最多的 `user_id`
 - 回滚安全性：备份 `meta.json` 缺失导致 `target_uid` 为空时，跳过 Memory / Connectors 恢复。原先路径会退化成整个 `connectors/` 目录并被 `rmtree` **删光所有账号的连接器配置**
 - 回滚完整性：Connectors / Memory 的恢复不再要求目标当前必须存在，只要备份里有就恢复。原先迁移后清理过目录就恢复不了
 - Memory 迁移在 `memory/` 目录不存在时自动创建，不再报错
 
 #### v1.6.1 (2026-09-21)
 
-**修复：`migrate_session.py` 行为与文档不符 / 静默失败**
+**修复：`migrate_session.py` 行为与文档不符 / 静默失败**（全部改动来自 [@bukall](https://github.com/bukall)，PR #5）
 
 - `--mode copy` 跨账号时不再退化成"改 `user_id` 转移归属"：copy 一律保留源，克隆一份归属到目标账号
 - 会话 `cwd` 为空时不再把正文静默写到 `projects/` 根目录（客户端按 `projects/<slug>/<id>.jsonl` 找，
@@ -530,12 +540,35 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - Default is `move` (deletes the source after migrating); use `--mode copy` to keep it.
 - If the target already has the conversation, you get a diff (last activity / message count / size / last prompt) and a choice: overwrite / skip / cancel.
 - Migrates the session row, usage stats, workspace entry **and** the `projects/*.jsonl` transcript — without the transcript the conversation opens empty.
+- Platform note: the full cross-edition flow is only tested on Windows (Win 11 + Python 3.13); on macOS, `--list` has been verified against a real domestic-edition fixture (2026-09-21). The script itself is cross-platform — issue reports welcome.
 
 ### Changelog
 
+#### v1.6.1 (2026-09-21)
+
+**Fixed: `migrate_session.py` behavior/docs mismatches & silent failures** (all changes by [@bukall](https://github.com/bukall), PR #5)
+
+- `--mode copy` across accounts no longer degrades to "reassign `user_id`": copy always keeps the source and clones one into the target account
+- Sessions with an empty `cwd` no longer silently write the transcript into the `projects/` root (the client looks it up at `projects/<slug>/<id>.jsonl` — the migration would "succeed" but the conversation would never open). Now a three-level fallback (row `cwd` → session profile `cwd` → source transcript's directory name), and it aborts with a rollback hint if still undeterminable
+- `--list` size stats now recurse into directories (previously `tool-results/` was under-counted as ~4KB)
+- Top-level `sqlite3.Error` handler added: when a cross-edition insert hits a new NOT NULL column without default in the target DB, you get an actionable "rollback with --rollback" message instead of a traceback
+- Soft-conflict overwrite: the deleted target conversation's `session_usage` rows are now backed up and rolled back too
+- Client process detection no longer treats a failed check as "client is closed" (explicit `--force` required); non-Windows platforms additionally match `ps -eo args=` against full command lines, avoiding Electron bundle-name misses
+- Transcript id rewriting now only touches `"sessionId":"..."` field values — a naive full-line replace used to corrupt message text that happened to contain the same id string (logs, paths)
+
+**Fixed: data-safety & parsing issues in `migrate.py`**
+
+- DB backup now uses the sqlite backup API (includes WAL data) instead of `shutil.copy2` on the main DB file — the latter captured a stale snapshot when the client was still running; falls back to file copy with an explicit warning
+- `PRAGMA wal_checkpoint`'s busy flag is now checked: no more claiming "verification passed" when the checkpoint didn't complete
+- Structured memory migration compares against **all** existing `memoryBlock`s in the target — repeated runs no longer append the same block twice
+- `_get_storage_json_path()` respects `WORKBUDDY_MIGRATE_HOME` / `--dir` and no longer reads the real machine's platform storage.json; `STORAGE_JSON` being `None` no longer leads to a bare `open()`
+- `get_connector_info()` reads `mcp.json` as UTF-8 explicitly (Chinese configs were silently swallowed, showing 0 servers)
+- user_id detection now uses UUID-shape matching instead of "directory name contains a hyphen"
+- `--rollback` accepts `--yes` to skip confirmation; combining it with `--source` etc. now errors out explicitly instead of silently prioritizing rollback
+
 #### v1.6.0 (2026-09-10)
 
-**Single-session cross-edition migration (domestic ⇄ international)**
+**Single-session cross-edition migration (domestic ⇄ international)** (this section's work by [@bukall](https://github.com/bukall), PR #5)
 
 - **New**: `scripts/migrate_session.py` — migrate one conversation between editions
 - **New**: carries `session_usage`, `workspaces` and the `projects/*.jsonl` transcript along (DB row alone = empty conversation)
@@ -543,7 +576,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - **New**: `move` by default, `copy` optional; per-session backup, rollback touches nothing else
 - **Improved**: current account now resolved from `storage/skeleton/account-snapshot.json` inside the data dir (edition-aware, cross-platform)
 - **Safety**: refuses to run while a WorkBuddy client is running
-- **Tests**: new `tests/` with fixture builder + 61 end-to-end checks, all in a temp dir
+- **Tests**: new `tests/` with fixture builder + 86 end-to-end checks, all in a temp dir
 
 **Fixed: backup crashed when the transcript included a `tool-results/` directory**
 
@@ -563,7 +596,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 
 **Changes to the existing `migrate.py`:**
 
-- Current account detection now uses `storage/skeleton/account-snapshot.json`
+- Current account detection now uses `storage/skeleton/account-snapshot.json` (edition-aware, cross-platform — by [@fhjowe](https://github.com/fhjowe), PR #6)
 - Rollback safety: if `meta.json` is missing and `target_uid` is empty, Memory/Connectors restore is skipped — the path would otherwise degrade to the whole `connectors/` dir and `rmtree` **every account's config**
 - Rollback completeness: Connectors/Memory are restored whenever the backup has them, even if the target no longer exists
 - Memory migration creates `memory/` when missing instead of crashing

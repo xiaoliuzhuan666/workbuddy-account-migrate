@@ -1,7 +1,7 @@
 ---
 name: 账号迁移工具
 description: WorkBuddy 账号切换后一键同步数据，将旧账号的 Session 历史、Memory 记忆、Connector 配置迁移到当前账号。触发关键词：切账号、迁移、同步数据、账号切换、数据丢失、记录没了。
-version: 1.6.0
+version: 1.6.1
 agent_created: true
 ---
 
