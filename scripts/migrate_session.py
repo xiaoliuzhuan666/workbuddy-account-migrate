@@ -53,6 +53,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # 复用原脚本：把 scripts/ 目录加入模块搜索路径
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -345,7 +346,7 @@ class EditionPaths:
                 setattr(legacy, k, v)
 
 
-def resolve_edition(name: str, home: Path = None) -> EditionPaths:
+def resolve_edition(name: str, home: Optional[Path] = None) -> EditionPaths:
     """解析某个版本的数据目录"""
     home = home or resolve_home()
     root = home / EDITION_DIR[name]
@@ -470,24 +471,26 @@ def get_current_uid(ep: EditionPaths):
         pass
 
     # 2. DB 中 session 数最多的 user_id（复用原脚本实现）
-    try:
-        with ep.bind_legacy():
-            counts = legacy.get_session_counts()
-        if counts:
-            uid = max(counts.items(), key=lambda kv: kv[1])[0]
-            if uid:
-                return uid, "db-majority"
-    except Exception:
-        pass
+    if legacy is not None:
+        try:
+            with ep.bind_legacy():
+                counts = legacy.get_session_counts()
+            if counts:
+                uid = max(counts.items(), key=lambda kv: kv[1])[0]
+                if uid:
+                    return uid, "db-majority"
+        except Exception:
+            pass
 
     # 3. 兜底：原脚本逻辑（platform storage.json）
-    try:
-        with ep.bind_legacy():
-            uid = legacy.get_current_user_id()
-        if uid:
-            return uid, "legacy-storage-json"
-    except Exception:
-        pass
+    if legacy is not None:
+        try:
+            with ep.bind_legacy():
+                uid = legacy.get_current_user_id()
+            if uid:
+                return uid, "legacy-storage-json"
+        except Exception:
+            pass
 
     return "", "unknown"
 

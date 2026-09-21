@@ -112,7 +112,7 @@ def first_session(home, edition):
     return r
 
 
-def pick_test_session(home):
+def pick_test_session(home) -> tuple:
     """挑一条【国内版有、国际版没有】的最新对话作为测试用例
 
     fixture 取自真实数据，用户可能已经把某些对话迁到国际版了。若刚好选到两边
@@ -129,11 +129,13 @@ def pick_test_session(home):
     d.close()
     for sid, title in rows:
         if sid not in have:
-            return sid, title
+            return str(sid), str(title or "")
     if rows:
         print("  ⚠️  国内版所有对话在国际版都已存在，只能选到会冲突的对话")
-        return rows[0]
-    return None, None
+        return str(rows[0][0]), str(rows[0][1] or "")
+    # fixture 里一条对话都没有，后续用例无从运行
+    print("❌ fixture 里没有任何对话，无法运行测试")
+    sys.exit(1)
 
 
 def session_with_tool_results(home):
@@ -308,13 +310,13 @@ def main():
 
         cj = _jsonl_path(home, "domestic", new_sid)
         check("副本正文已生成", cj is not None and cj.exists())
-        if cj and cj.exists():
+        if cj is not None and cj.exists() and new_sid:
             txt = cj.read_text(encoding="utf-8", errors="replace")
             check("副本正文内 sessionId 已改写", sid not in txt and new_sid in txt,
                   f"残留旧id={sid in txt} 含新id={new_sid in txt}")
 
         orig = db_row_full(home, "domestic", sid)
-        oshown = (orig[3] or orig[2] or "") if orig else ""
+        oshown = str((orig[3] or orig[2] or "") if orig else "")
         check("原始对话保留", orig is not None)
         check("原始对话未被加副本标记", orig is not None and "副本" not in oshown, f"got={oshown}")
 
@@ -503,7 +505,7 @@ def _ensure_usage(home, edition, sid):
     try:
         cols = [d[0] for d in c.execute("SELECT * FROM session_usage LIMIT 1").description]
         exist = c.execute("SELECT * FROM session_usage LIMIT 1").fetchone()
-        row = dict(zip(cols, exist)) if exist else {k: None for k in cols}
+        row: dict = dict(zip(cols, exist)) if exist else {}
         row["session_id"] = sid
         for k, v in (("used", 1), ("size", 1), ("updated_at", 1789000000000)):
             if k in cols and not row.get(k):
@@ -592,8 +594,8 @@ def unit_tests(home):
         sys.path.insert(0, str(ROOT / "scripts"))
         for m in ("migrate", "migrate_session"):
             sys.modules.pop(m, None)
-        import migrate
-        import migrate_session as ms
+        import migrate  # type: ignore[import-not-found]  # scripts/ 已加入 sys.path
+        import migrate_session as ms  # type: ignore[import-not-found]
 
         # --- 1) user_id 判定不能只看"含连字符" ---
         check("UUID 形态目录算账号",
