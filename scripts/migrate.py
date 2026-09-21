@@ -9,6 +9,8 @@ WorkBuddy 账号迁移工具
   python3 migrate.py --diagnose                # 诊断模式：查看所有账号数据分布
   python3 migrate.py --source USER_ID          # 指定源账号迁移（高级用户）
   python3 migrate.py --source USER_ID --yes    # 跳过确认直接迁移
+  python3 migrate.py --intl                    # 强制使用国际版数据目录 ~/.workbuddy-ai
+  python3 migrate.py --dir PATH                # 显式指定数据目录（优先级高于 --intl）
   python3 migrate.py --rollback TIMESTAMP      # 回滚到指定备份
   python3 migrate.py --restore-tasks           # 恢复历史任务到当前 session
   python3 migrate.py --restore-tasks --session SESSION_ID  # 恢复指定 session 的任务
@@ -33,13 +35,31 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+def _home() -> Path:
+    """home 目录，支持环境变量覆盖（测试时指向临时 fixture，不碰真实数据）"""
+    env = os.environ.get("WORKBUDDY_MIGRATE_HOME")
+    return Path(env) if env else Path.home()
+
+
 def _find_workbuddy_dir():
     """自动探测数据目录：国际版用 ~/.workbuddy-ai，国内版用 ~/.workbuddy"""
-    ai_dir = Path.home() / ".workbuddy-ai"
+    ai_dir = _home() / ".workbuddy-ai"
     # 目录存在且非空即视为国际版（不依赖 DB 是否已生成）
     if ai_dir.is_dir() and any(ai_dir.iterdir()):
         return ai_dir
-    return Path.home() / ".workbuddy"
+    return _home() / ".workbuddy"
+
+
+def _setup_paths(edition):
+    """按版本切换到对应的 WorkBuddy 数据目录
+
+    Args:
+        edition: "domestic" 使用 ~/.workbuddy，其他值（"intl"）使用 ~/.workbuddy-ai
+
+    等价于 _set_workbuddy_dir(_home() / "<版本目录>")，与 _find_workbuddy_dir()
+    共用同一套派生路径推导，避免两处逻辑各自演化。
+    """
+    _set_workbuddy_dir(_home() / (".workbuddy-ai" if edition == "intl" else ".workbuddy"))
 
 
 def _get_storage_json_path():
@@ -404,7 +424,8 @@ def migrate_memory(source_uid, target_uid):
         return
 
     if not dst_file.exists():
-        # 目标不存在，直接复制
+        # 目标不存在，直接复制（memory 目录本身也可能不存在）
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
         dst_file.write_text(src_content, encoding="utf-8")
         print(f"  ✅ 复制 Memory（目标为空，直接复制 {len(src_content)} 字符）")
         return
@@ -617,28 +638,68 @@ def rollback(backup_tag):
         shutil.copy2(str(db_backup), str(DB_PATH))
         print("  ✅ 已恢复数据库")
 
-    # 恢复 Memory
-    if target_uid:
+    if not target_uid:
+        # target_uid 为空时 CONNECTORS_DIR / target_uid 会退化成整个 connectors 目录，
+        # 此时绝不能做任何删除/覆盖操作，否则会误删全部连接器配置。
+        print("  ⚠️  备份缺少目标账号信息（meta.json 不完整），跳过 Memory / Connectors 恢复")
+        print("     （target_uid 为空时路径会退化成整个目录，不能做任何删除操作）")
+    else:
+        # 恢复 Memory：只要备份里有就恢复，不要求目标文件当前必须存在
         mem_backup = backup_path / f"{target_uid}_memory.md"
-        mem_target = MEMORY_DIR / f"{target_uid}_memory.md"
-        if mem_backup.exists() and mem_target.exists():
-            shutil.copy2(str(mem_backup), str(mem_target))
+        if mem_backup.exists():
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(mem_backup), str(MEMORY_DIR / f"{target_uid}_memory.md"))
             print("  ✅ 已恢复 Memory")
 
-    # 恢复 Connectors
-    conn_backup = backup_path / target_uid
-    conn_target = CONNECTORS_DIR / target_uid
-    if conn_backup.exists() and conn_target.exists():
-        if conn_target.exists():
-            shutil.rmtree(str(conn_target))
-        shutil.copytree(str(conn_backup), str(conn_target))
-        print("  ✅ 已恢复 Connectors")
+        # 恢复 Connectors：同样只看备份里有没有。
+        # 目标目录当前不存在是常见情况（比如迁移后手动清理过），此时应当重建而不是跳过。
+        conn_backup = backup_path / target_uid
+        conn_target = CONNECTORS_DIR / target_uid
+        if conn_backup.exists():
+            if conn_target.exists():
+                shutil.rmtree(str(conn_target))
+            shutil.copytree(str(conn_backup), str(conn_target))
+            print("  ✅ 已恢复 Connectors")
+        else:
+            print("  ⏭️  备份中没有 Connector 数据，跳过")
 
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 
 
-def interactive_migrate():
+def interactive_migrate(skip_edition_prompt=False):
     """交互式迁移向导：列出所有账号，用户分别选择源和目标"""
+
+    # 版本选择：默认沿用自动探测结果，--intl 时跳过询问
+    detected = "intl" if WORKBUDDY_DIR.name == ".workbuddy-ai" else "domestic"
+    if not skip_edition_prompt:
+        default_choice = "2" if detected == "intl" else "1"
+        print("=" * 70)
+        print("WorkBuddy 版本选择")
+        print("=" * 70)
+        print()
+        print("  1. 国内版（数据目录 ~/.workbuddy）")
+        print("  2. 国际版（数据目录 ~/.workbuddy-ai）")
+        print(f"\n  当前自动探测：{'国际版' if detected == 'intl' else '国内版'}（{WORKBUDDY_DIR}）")
+        print()
+        while True:
+            try:
+                choice = input(f"请选择 WorkBuddy 版本（输入序号，默认 {default_choice}）: ").strip()
+                if not choice:
+                    break
+                if choice == "2":
+                    _setup_paths("intl")
+                    print("  -> 已选择国际版\n")
+                    break
+                elif choice == "1":
+                    _setup_paths("domestic")
+                    print("  -> 已选择国内版\n")
+                    break
+                else:
+                    print("  请输入 1 或 2")
+            except (EOFError, KeyboardInterrupt):
+                print("\n已取消")
+                return
+
     all_uids = get_all_user_ids()
     session_counts = get_session_counts()
     memory_sizes = get_memory_sizes()
@@ -1040,6 +1101,7 @@ def generate_task_create_commands(target_session_id=None):
 def main():
     parser = argparse.ArgumentParser(description="WorkBuddy 账号迁移工具")
     parser.add_argument("--dir", type=str, help="WorkBuddy 数据目录（默认自动探测：~/.workbuddy-ai 或 ~/.workbuddy）")
+    parser.add_argument("--intl", action="store_true", help="强制使用国际版数据目录 ~/.workbuddy-ai（默认自动探测，--dir 优先级更高）")
     parser.add_argument("--diagnose", "-d", action="store_true", help="诊断模式：查看所有账号数据分布")
     parser.add_argument("--source", "-s", type=str, help="源账号 user_id（要迁移出的账号）")
     parser.add_argument("--target", "-t", type=str, help="目标账号 user_id（接收数据的账号，默认从登录态 storage.json / account-snapshot.json 自动推断）")
@@ -1052,8 +1114,11 @@ def main():
 
     args = parser.parse_args()
 
+    # 目录优先级：--dir > --intl > 自动探测（模块导入时已按 _find_workbuddy_dir() 算好）
     if args.dir:
         _set_workbuddy_dir(args.dir)
+    elif args.intl:
+        _setup_paths("intl")
 
     if args.diagnose:
         diagnose()
@@ -1070,7 +1135,7 @@ def main():
         migrate(args.source, target_uid=args.target, skip_confirm=args.yes, target_is_manual=args.target is not None)
     else:
         # 无参数时进入交互式向导
-        interactive_migrate()
+        interactive_migrate(skip_edition_prompt=args.intl)
 
 
 if __name__ == "__main__":
