@@ -52,6 +52,8 @@ macos
 | workbuddy 数据丢失 恢复 | FAQ Q1 + 回滚章节 |
 | workbuddy 对话记录 恢复 | 标题 + FAQ Q1 |
 | workbuddy 记忆 合并 迁移 | 功能特性 + 迁移内容表格 |
+| workbuddy 单个对话 迁移 | 单对话跨版本迁移章节 + 参数表 |
+| workbuddy 国内版 国际版 迁移 | 版本选择章节 + `--intl` / `--dir` 说明 |
 | workbuddy MCP 连接器 配置丢失 | 迁移内容表格 + 功能特性 |
 | 腾讯云代码助手 切换账号 | 兼容性章节 |
 | codebuddy 切账号 数据 | 兼容性章节 + FAQ Q4 |
@@ -64,6 +66,8 @@ macos
 | workbuddy account switch conversation history | Title + English section |
 | workbuddy data recovery after account change | English section + FAQ |
 | workbuddy migrate sessions between accounts | What Gets Migrated table |
+| workbuddy migrate single conversation | Single-session cross-edition section |
+| workbuddy domestic international edition | Domestic vs International note |
 | workbuddy memory sync merge | Features + English section |
 | workbuddy MCP connector config missing | What Gets Migrated table |
 

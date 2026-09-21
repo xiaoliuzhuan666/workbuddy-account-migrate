@@ -153,6 +153,9 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 | 版本 | 同一版本内 | **支持国内 ⇄ 国际** |
 | 默认语义 | 合并（源保留） | **移动（源删除）**，可 `--mode copy` |
 
+> **`--mode copy` 的语义**：无论源对话属于哪个账号，copy 都会**保留源**，在目标账号下克隆出一份新对话。
+> 此前跨账号 + copy 走的是改 `user_id`（归属转移），源账号会丢失该对话，与"保留源"矛盾，已修正。
+
 **⚠️ 迁移前必须关闭两个版本的 WorkBuddy 窗口**，脚本会检测并拒绝执行。原因：数据还在 WAL 里没落盘、客户端内存缓存会覆盖你的写入。
 
 **一个对话实际包含哪些东西**（少一样客户端就显示异常）：
@@ -208,7 +211,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 |:---|:---|:---|
 | `--from` / `--to` | 源/目标版本 `domestic`\|`intl` | `domestic` |
 | `--session-id` | 对话 id（支持前缀） | - |
-| `--mode` | `move`（迁移后删源）/ `copy`（保留） | **`move`** |
+| `--mode` | `move`（迁移后删源）/ `copy`（保留源并克隆一份到目标账号） | **`move`** |
 | `--on-conflict` | `ask`/`skip`/`overwrite`/`newer`（无终端询问时 `ask` 降级为 `skip`） | `ask` |
 | `--dry-run` | 只打印计划不写盘 | 关 |
 | `--force` | 跳过"客户端必须关闭"检测 | 关 |
@@ -309,7 +312,7 @@ workbuddy-account-migrate/
 │   └── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
 ├── tests/
 │   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
-│   └── run_tests.py                       # 端到端测试（61 项）
+│   └── run_tests.py                       # 端到端测试（86 项，含 migrate.py 单元级用例）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
@@ -326,6 +329,15 @@ workbuddy-account-migrate/
 - Bug 报告 / 功能请求 → [Issues](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate/issues)
 - 代码贡献 → 提交 PR，请确保无硬编码的 user_id 或 Token
 - Windows / Linux 实测反馈 → 欢迎 Issue
+
+### 已知限制
+
+| 限制 | 说明 |
+|:---|:---|
+| Memory 多语义块 | 结构化 Memory 迁移是**追加**一个 `RAW_JSON` 块。WorkBuddy 客户端是否合并读取多个块未经验证——若客户端只读首块，迁移过去的记忆在文件里存在但 UI 不显示。脚本追加后会提示你去客户端确认 |
+| 非 Windows 进程检测 | 客户端"必须关闭"检测在 Windows 用 `tasklist` 实测有效；macOS / Linux 走 `ps`，Electron 应用的进程名可能是包名，存在漏报，必要时用 `--force` 并自行确认 |
+| 会话 `cwd` 为空 | 极少数会话记录里 `cwd` 为空，正文目录只能靠源侧目录名回退；若连这也取不到，脚本会中止而不是静默放错位置 |
+| 正文 id 改写范围 | 只改写 `"sessionId":"..."` 字段值。消息正文里引用到的旧 id（日志、路径）保持原样——那是用户可见内容，不应被改 |
 
 ### 更新日志
 
@@ -345,7 +357,7 @@ workbuddy-account-migrate/
 - 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
 - 备份精确到单条，回滚不影响其他对话；`--dry-run` 可先预览
 - 安全：迁移前检测客户端是否运行，**未关闭则拒绝执行**（WAL 未落盘 + 内存缓存会覆盖写入）
-- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 61 项端到端测试，全程在临时目录运行
+- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 86 项端到端 + 单元级测试，全程在临时目录运行
 
 **修复：正文含 `tool-results/` 目录时备份直接崩溃**
 
@@ -372,6 +384,35 @@ workbuddy-account-migrate/
 - 回滚安全性：备份 `meta.json` 缺失导致 `target_uid` 为空时，跳过 Memory / Connectors 恢复。原先路径会退化成整个 `connectors/` 目录并被 `rmtree` **删光所有账号的连接器配置**
 - 回滚完整性：Connectors / Memory 的恢复不再要求目标当前必须存在，只要备份里有就恢复。原先迁移后清理过目录就恢复不了
 - Memory 迁移在 `memory/` 目录不存在时自动创建，不再报错
+
+#### v1.6.1 (2026-09-21)
+
+**修复：`migrate_session.py` 行为与文档不符 / 静默失败**
+
+- `--mode copy` 跨账号时不再退化成"改 `user_id` 转移归属"：copy 一律保留源，克隆一份归属到目标账号
+- 会话 `cwd` 为空时不再把正文静默写到 `projects/` 根目录（客户端按 `projects/<slug>/<id>.jsonl` 找，
+  放根目录等于迁移成功却打不开）。现在按「行 cwd → 会话画像 cwd → 源正文所在目录名」三级回退，
+  仍无法确定则中止并提示回滚
+- 列表大小统计改为递归累加（`--list` 这一处漏改，`tool-results/` 仍被算成 ~4KB）
+- 顶层补上 `sqlite3.Error` 分支：跨库插入撞上目标库新增的 NOT NULL 无默认值列时，
+  给出"用 --rollback 回滚"的可操作提示，而不是 traceback
+- 软冲突覆盖：被删掉的那条目标对话的 `session_usage` 现在会一起备份与回滚
+- 客户端进程检测失败不再静默当成"已关闭"（要求显式 `--force`）；非 Windows 额外用
+  `ps -eo args=` 匹配完整命令行，避免 Electron 包名漏报
+- 正文 id 改写只动 `"sessionId":"..."` 字段值：以前整行 replace 会把消息正文里
+  恰好出现同串 id 的文本（日志、路径）一起改坏
+
+**修复：`migrate.py` 的数据安全与解析问题**
+
+- 备份数据库改用 sqlite backup API（带 WAL），不再 `shutil.copy2` 主库文件
+  ——客户端没退出时后者拿到的是陈旧快照；失败时退回文件复制并明确告警
+- `PRAGMA wal_checkpoint` 的 busy 标志现在会判断：checkpoint 没做完时不再宣称"验证通过"
+- Memory 结构化迁移改为与目标里**所有**已有 `memoryBlock` 比对，重复执行不再重复追加同一块
+- `_get_storage_json_path()` 改为受 `WORKBUDDY_MIGRATE_HOME` / `--dir` 约束，
+  不再去读真实机器的平台 storage.json；`STORAGE_JSON` 为 `None` 时不再直接 `open()`
+- `get_connector_info()` 显式按 utf-8 读取 `mcp.json`（中文配置此前被静默吞掉显示 0 个 server）
+- user_id 判定改用 UUID 形态匹配，不再"目录名含连字符就算账号"
+- `--rollback` 支持 `--yes` 跳过确认；与 `--source` 等参数同时给出时明确报错，不再静默优先
 
 #### v1.5.0 (2026-09-09)
 

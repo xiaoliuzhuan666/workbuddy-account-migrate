@@ -78,22 +78,29 @@ WorkBuddy 数据存储架构：**本地优先 + 账号隔离**
    - `~/.workbuddy/connectors/` 下的子目录
 3. 展示对比表格，用户输入序号选择要迁移的源账号（无需知道 user_id）
 
-**⚠️ 获取当前 user_id 的关键逻辑（v1.4 修订）**：
+**⚠️ 获取当前 user_id 的关键逻辑（v1.6 修订，按版本区分）**：
 
-v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号在切换前的最后一条 session 可能比当前账号的 session 更新**，导致误把旧账号当成当前账号。v1.4 反转为：
+v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号在切换前的最后一条 session 可能比当前账号的 session 更新**，导致误把旧账号当成当前账号。现在的策略是按版本分开：
 
-1. **storage.json 的 genie.userId 是登录态权威来源**（优先使用）
-2. DB 中 session 数最多的 user_id 仅作辅助交叉验证
-3. 两者不一致时优先用 storage.json 并发出警告
+1. **国内版**：平台 `storage.json` 的 `genie.userId` 为登录态权威来源
+2. **国际版**：数据目录内 `storage/skeleton/account-snapshot.json` 的 `primary.uid` 为权威来源
+   （跨平台路径统一，不依赖 `%APPDATA%` 探测）
+3. DB 中 session 数最多的 user_id 仅作辅助交叉验证；两者不一致时优先登录态来源并**发出警告**
 4. **最可靠的终极验证**：查 DB 最新 session（`ORDER BY updated_at DESC LIMIT 1`），用其标题确认是否为当前正在进行的对话——当前对话本身的 user_id 就是真实登录身份（2026-09-20 实战验证有效）
+
+> 注意上述第 1 条与下面最佳实践第 3 条并不矛盾：**脚本**按版本优先级读取登录态，
+> 但**你在对话里手动判断**时，`storage.json` 可能未随账号切换即时更新，
+> 此时应当以"当前对话所属 user_id"为准。
 
 **AI 手动迁移时的最佳实践**：
 
 当 AI 在对话中直接执行迁移（而非运行 migrate.py），应：
 1. 先查询 `SELECT user_id, COUNT(*) FROM sessions GROUP BY user_id` 看分布
 2. 通过当前对话 session 的 user_id 确定目标 ID（最可靠）
-3. **不要**依赖 storage.json 的 genie.userId（可能过时）
-4. 执行 UPDATE 后**必须**做 `PRAGMA wal_checkpoint(TRUNCATE)` 确保持久化
+3. **不要单独依赖** `storage.json` 的 `genie.userId`——账号切换后它可能没同步更新（仍为旧 ID），
+   只把它当作辅助信号，与当前对话的 user_id 交叉核对
+4. 执行 UPDATE 后**必须**做 `PRAGMA wal_checkpoint(TRUNCATE)` 确保持久化；
+   并留意 checkpoint 返回值的 busy 标志，busy≠0 说明有进程占锁、结果尚未落盘
 5. 验证 `SELECT COUNT(*) FROM sessions WHERE user_id = '{旧ID}'` 确认归零
 
 ### Phase 2：备份（必须）
@@ -351,7 +358,7 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 
 原因：① 数据还在 WAL 没落盘；② 客户端退出时内存缓存会覆盖写入；③ 两个客户端同时持锁。
 
-### 一个对话 = 4 样东西
+### 一个对话 = 5 样东西
 
 只搬数据库行会导致**对话打开是空的**，缺一不可：
 
@@ -416,24 +423,48 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 | **正文不只是文件，还有目录** | `find_project_files()` 用 `glob("*/{sid}*")` 匹配，会命中与会话同名的 **`tool-results/` 目录**；对它 `shutil.copy2()` 在 Windows 上抛 `PermissionError: [Errno 13]`，备份阶段直接崩 | 文件与目录统一走 `copy_path()` / `remove_path()`；统计大小用递归 `path_size()` |
 | **目录大小被算成 0** | 目录 `stat().st_size` 不含内部文件，`tool-results/` 的贡献被漏掉 | 递归累加 `p.rglob("*")` |
 | **同版本 copy 空转** | `_migrate_intra` 只会改 `user_id`，源对话已属于当前账号时打印「无需迁移」就退出，用户想要的那份复制根本没发生 | uid 相同走克隆分支：新 id + 新标题 + 复制正文/任务 |
-| **克隆后正文仍指向原对话** | 每条消息都内嵌 `"sessionId":"<sid>"`，只改文件名不改正文，副本内部还是旧 id | `_rewrite_session_id()` 逐行流式替换（大文件不能整个读进内存） |
+| **克隆后正文仍指向原对话** | 每条消息都内嵌 `"sessionId":"<sid>"`，只改文件名不改正文，副本内部还是旧 id | `_rewrite_session_id()` 逐行流式替换（大文件不能整个读进内存），且**只替换 `"sessionId":"..."` 字段值**——消息正文里引用到同串 id 的日志/路径属于用户可见内容，不能改 |
 | **克隆回滚误删原对话** | 通用回滚按 `session_id`（= 原始对话 id）删行，同版本克隆时源目标同库，会把原对话一起删掉 | 备份写 `kind=session_clone` + `new_session_id`，回滚走独立分支只删副本 |
 
 ## 同版本迁移的两种语义
 
-`--from` 与 `--to` 相同时自动判断：
+`--from` 与 `--to` 相同时判断顺序如下（`--mode` 优先于账号归属）：
 
 | 情况 | 行为 | 备份 kind |
 |:---|:---|:---|
-| 源对话属于**别的账号** | 只 `UPDATE sessions.user_id`（归属转移） | `session_intra` |
-| 源对话**已属于当前账号** | 克隆出新对话（新 id，标题加「（副本）」） | `session_clone` |
+| `--mode copy`（不论源属于哪个账号） | **保留源**，克隆出新对话归属到目标账号（新 id，标题加「（副本）」） | `session_clone` |
+| `--mode move` + 源对话属于**别的账号** | 只 `UPDATE sessions.user_id`（归属转移，源账号将看不到该对话） | `session_intra` |
+| `--mode move` + 源对话**已属于当前账号** | 无归属可改，退化为克隆（新 id，标题加「（副本）」） | `session_clone` |
+
+> 曾经 `mode` 参数收下却没用：跨账号 + copy 走的是 UPDATE，源账号会丢失该对话，与"copy=保留源"矛盾。
+
+## 本轮修复补进来的坑（2026-09-21）
+
+| 现象 | 根因 | 处理 |
+|:---|:---|:---|
+| 备份是陈旧快照 | `migrate.py` 用 `shutil.copy2` 复制主库文件，WAL 里未落盘的数据没带上 | 改用 sqlite backup API（`_backup_db()`），失败退回文件复制并告警 |
+| checkpoint 失败仍报"验证通过" | 只打印 `PRAGMA wal_checkpoint` 返回值，没看 busy 标志 | `_wal_checkpoint()` 返回成功与否；busy 时提示"校验未完成" |
+| Memory 重复迁移重复追加 | 只比较首个 `memoryBlock`，迁移一次后目标首块≠源块 → 再追加一遍 | 与目标里**所有**已有块比对（`_extract_memory_blocks` + finditer） |
+| fixture 里读到真实登录态 | `_get_storage_json_path()` 走 `Path.home()` / `%APPDATA%`，不受 `WORKBUDDY_MIGRATE_HOME` 约束 | 一律从 `_home()` 推导；home 被覆盖时忽略 APPDATA |
+| 中文 mcp.json 显示 0 个 server | 裸 `open()` 按 GBK 解码失败，又被裸 `except` 吞掉 | 显式 `encoding="utf-8"` + 打印失败原因 |
+| 普通目录被当成账号 | 判定"目录名含 `-`" | UUID 形态匹配（`_looks_like_uid`） |
+| `--rollback` 卡在确认 / 与 `--source` 静默冲突 | 硬编码 `input()`，无互斥检查 | `rollback(skip_confirm=)`；组合非法时报错退出 |
+| cwd 为空时正文落到 `projects/` 根目录 | `if not dst_dir` 恒为 False，slug 为空直接拼到根目录 | 三级 slug 回退 + 退化即中止 |
+| 列表大小统计偏小 | `--list` 路径仍用 `f.stat().st_size` | 改用递归 `path_size()` |
+| 跨库插入裸抛 sqlite 异常 | 顶层只捕获 `RuntimeError` | 增加 `sqlite3.Error` 分支给出回滚指引 |
+| 进程检测失败被当成"没在跑" | `except: pass` 吞掉异常 | `find_running_clients()` 返回 `(found, trustworthy)`，不可信时要求 `--force` |
+| 正文 id 改写误伤用户文本 | 整行 `replace(old_sid, new_sid)` | 只替换 `"sessionId":"<old>"` 字段值（实测正文里 2/3 的出现是消息文本） |
 
 ## 测试
 
 ```bash
 python3 tests/prepare_fixture.py    # 在临时目录构造 fixture（只读复制真实数据子集）
-python3 tests/run_tests.py          # 61 项端到端测试
+python3 tests/run_tests.py          # 86 项：端到端 + migrate.py 单元级用例
 ```
+
+新增用例覆盖：跨账号 copy 保留源、软冲突覆盖后 usage 回滚、cwd 为空不落根目录、
+UUID 判定、Memory 重复迁移、fixture 下不读真实 storage.json、sqlite backup API 备份、
+中文 mcp.json 解析、正文 id 改写范围、`--rollback` 互斥与 `--yes`。
 
 **严禁在真实数据目录上跑迁移测试**——fixture 用 `WORKBUDDY_MIGRATE_HOME` 环境变量指向临时目录，脚本内所有路径都从它派生。
 
