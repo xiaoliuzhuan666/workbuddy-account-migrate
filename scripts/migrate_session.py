@@ -208,7 +208,11 @@ def text_of(content) -> str:
 
 
 def find_running_clients():
-    """检测正在运行的 WorkBuddy / CodeBuddy 客户端进程名"""
+    """检测正在运行的 WorkBuddy / CodeBuddy 客户端进程
+
+    返回 (进程名列表, 检测是否可信)。检测命令失败（ps/tasklist 不存在或报错）时
+    不能静默当成"没有客户端在跑"——那会让迁移在客户端持锁的情况下继续。
+    """
     found = set()
     system = platform.system()
     try:
@@ -223,22 +227,45 @@ def find_running_clients():
                 if row and any(k in row[0].lower() for k in PROC_KEYWORDS):
                     found.add(row[0])
         else:
-            out = subprocess.run(
-                ["ps", "-eo", "comm="],
-                capture_output=True, text=True, errors="replace", timeout=15,
-            ).stdout
-            for line in out.splitlines():
-                name = line.strip()
-                if name and any(k in name.lower() for k in PROC_KEYWORDS):
-                    found.add(name)
-    except Exception:
-        pass
-    return sorted(found)
+            # comm= 只有进程名，macOS/Linux 上 Electron 应用的进程名常是包名
+            # 或 "Electron"；args= 带完整命令行，能匹配到安装路径里的关键字。
+            for ps_args in (["ps", "-eo", "comm="], ["ps", "-eo", "args="]):
+                out = subprocess.run(
+                    ps_args, capture_output=True, text=True,
+                    errors="replace", timeout=15,
+                ).stdout
+                for line in out.splitlines():
+                    name = line.strip()
+                    if not name:
+                        continue
+                    if any(k in name.lower() for k in PROC_KEYWORDS):
+                        found.add(Path(name.split()[0]).name or name)
+    except Exception as e:
+        # 检测失败要如实上报，由调用方决定如何处理
+        print(f"⚠️  客户端进程检测失败（{e}），无法确认客户端是否已关闭")
+        return [], False
+    return sorted(found), True
 
 
-def require_clients_closed(force=False) -> bool:
-    """迁移前必须关闭两个版本客户端，否则返回 False"""
-    running = find_running_clients()
+def _clients_closed_or_force(force=False) -> bool:
+    """确认客户端已关闭；检测不可信时要求显式 --force 或手动确认"""
+    running, trustworthy = find_running_clients()
+    if not trustworthy and not force:
+        print("   若已确认客户端全部退出，可用 --force 继续。")
+        return False
+    if running:
+        return require_clients_closed(running, force)
+    return True
+
+
+def require_clients_closed(running=None, force=False) -> bool:
+    """迁移前必须关闭两个版本客户端，否则返回 False
+
+    running 可直接传入进程名列表（由 _clients_closed_or_force 检测好后传进来）；
+    传 None 时自行检测（仅用于兼容直接调用的场景）。
+    """
+    if running is None:
+        running, _ok = find_running_clients()
     if not running:
         return True
 
@@ -923,12 +950,16 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         meta["override_id"] = extra_row.get("id", "")
 
     # usage 行
-    for tag_, ep in (("src_usage.json", src_ep), ("dst_usage.json", dst_ep)):
+    # 软冲突覆盖时还会删掉目标旧对话的 usage，必须一并备份，否则回滚后丢失
+    usage_targets = [("src_usage.json", src_ep, session_id), ("dst_usage.json", dst_ep, session_id)]
+    if extra_row and extra_row.get("id"):
+        usage_targets.append(("override_usage.json", dst_ep, extra_row["id"]))
+    for tag_, ep, uid_sid in usage_targets:
         conn = connect_ro(ep.db)
         if conn is None:
             continue
         try:
-            r = conn.execute("SELECT * FROM session_usage WHERE session_id = ?", (session_id,)).fetchone()
+            r = conn.execute("SELECT * FROM session_usage WHERE session_id = ?", (uid_sid,)).fetchone()
             if r:
                 cols = table_columns(conn, "session_usage")
                 (bp / tag_).write_text(
@@ -1106,6 +1137,19 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             )
             conn.commit()
             print(f"  ✅ 已恢复目标中被覆盖的旧对话 {str(row.get('id'))[:8]}…")
+            # usage 行同样要恢复：迁移时 DELETE 过，不还原的话用量统计会凭空消失
+            uf = bp / "override_usage.json"
+            if uf.exists():
+                u = json.loads(uf.read_text(encoding="utf-8"))
+                ucols = [c for c in u.keys() if c in table_columns(conn, "session_usage")]
+                if ucols:
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO session_usage ({','.join(ucols)}) "
+                        f"VALUES ({','.join('?' * len(ucols))})",
+                        [u[c] for c in ucols],
+                    )
+                    conn.commit()
+                    print(f"  ✅ 已恢复其 session_usage")
         finally:
             conn.close()
         for f in meta.get("override_files", []):
@@ -1269,14 +1313,14 @@ def do_migrate(src_ep, dst_ep, sid, mode="move", on_conflict="ask",
 
 
 def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
-    """同版本迁移，两种语义：
+    """同版本迁移，三种语义：
 
-    1) 归属转移：源 user_id != 目标 uid → 只改 sessions.user_id（沿用 migrate.py 的做法）
-    2) 同版本复制：源 user_id == 目标 uid → 克隆出一条新对话（新 id）
+    1) copy（--mode copy）：无论源属于哪个账号，都克隆出一条新对话，源保持不动
+    2) move + 源属其他账号：改 sessions.user_id 完成归属转移（源账号看不到该对话）
+    3) move + 源已属目标账号：没有归属可改，退化为同版本克隆
 
-    第 2 种以前会直接打印「该对话已属于目标账号，无需迁移」然后退出，
-    但用户选了 copy 却没有归属可改时，真实意图是「在同一版本里多复制一份」，
-    空转是不符合预期的，所以这里必须真的复制一条出来。
+    以前 mode 参数收下却没用：跨账号 + copy 时走的是 UPDATE（归属转移），
+    源账号会失去这条对话，与帮助文本「copy=保留源」直接矛盾。
     """
     if not target_uid:
         target_uid, _src = get_current_uid(ep)
@@ -1291,6 +1335,10 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
     print("=" * 70)
     print(f"\n  对话: {str(src_row.get('title'))[:50]}")
     print(f"  {old_uid[:12]}… → {target_uid[:12]}…")
+    if mode == "copy":
+        # copy 的核心承诺是"源不动"：跨账号时也一样，克隆到目标账号而不是改归属
+        print("\n  ℹ️  --mode copy：保留源对话，改为克隆一份归属到目标账号")
+        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes)
     if old_uid == target_uid:
         # 归属无需变更：真正的诉求是复制一份，交给克隆逻辑处理
         print("\n  ℹ️  该对话已属于当前账号，无归属可改 → 按「同版本复制」处理")
@@ -1329,15 +1377,18 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
 def _rewrite_session_id(path: Path, old_sid: str, new_sid: str):
     """把正文 jsonl 里内嵌的 sessionId 换成新 id
 
-    每条消息都带 "sessionId":"<sid>"，只改文件名不改正文会让副本内部仍指向原对话。
-    逐行流式替换，避免把几 MB 的正文整个读进内存。
+    只替换 "sessionId":"<old>" 这种字段值：会话正文（text）里同样会出现这个 id 串
+    （日志、路径、引用等），整行 replace 会把用户可见的消息内容一起改坏。
+
+    逐行流式处理，避免把几 MB 的正文整个读进内存。
     """
+    pat = re.compile(r'("sessionId"\s*:\s*")' + re.escape(old_sid) + r'(")')
     tmp = path.with_name(path.name + ".tmp")
     # newline="" 保证 \r\n 原样保留，不被通用换行模式改写
     with open(path, encoding="utf-8", errors="replace", newline="") as fin, \
             open(tmp, "w", encoding="utf-8", newline="") as fout:
         for line in fin:
-            fout.write(line.replace(old_sid, new_sid))
+            fout.write(pat.sub(lambda m: m.group(1) + new_sid + m.group(2), line))
     tmp.replace(path)
 
 
@@ -1427,11 +1478,26 @@ def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes):
         target = f.parent / f.name.replace(sid, new_sid)
         if not safe_copy(f, target):
             raise RuntimeError("复制对话正文失败，已中止（请执行回滚）")
-        if target.is_file() and target.suffix == ".jsonl":
+        # .jsonl 是正文；.meta.json / .file-rollback.ndjson 也可能内嵌 sessionId，
+        # 一并走同一套（只改 "sessionId":"..." 字段值）的替换
+        if target.is_file() and target.suffix in (".jsonl", ".json", ".ndjson"):
             _rewrite_session_id(target, sid, new_sid)
         meta["copied_to"].append(str(target))
         mark = "目录" if target.is_dir() else "文件"
         print(f"  ✅ {target.name} [{mark}] ({fmt_size(path_size(target))})")
+
+    # 校验：副本里不应再出现旧的 session id（残留说明有字段没被改写，客户端可能串台）
+    leftovers = []
+    for rel in meta.get("copied_to", []):
+        p = Path(rel)
+        if p.is_file() and p.suffix in (".jsonl", ".json", ".ndjson"):
+            try:
+                if sid in p.read_text(encoding="utf-8", errors="replace"):
+                    leftovers.append(p.name)
+            except Exception:
+                pass
+    if leftovers:
+        print(f"  ⚠️  以下文件内仍残留旧 session id，请人工确认：{', '.join(leftovers)}")
 
     src_tasks = ep.tasks_dir / sid
     if src_tasks.exists():
@@ -1633,10 +1699,21 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
     if existing:
         dst_dir = existing[0].parent
     else:
-        dst_dir = dst_ep.projects_dir / cwd_to_slug(src_row.get("cwd", ""))
-        if not dst_dir or not cwd_to_slug(src_row.get("cwd", "")):
-            dst_dir = dst_ep.projects_dir / cwd_to_slug(src_info.cwd)
+        # 目录名由 cwd 推导；cwd 为空时（老会话/异常数据）退回用源侧正文所在目录名，
+        # 否则 projects_dir / "" 会把正文直接扔在 projects 根目录，
+        # 客户端按 projects/<slug>/<sid>.jsonl 找，等于迁移成功却打不开。
+        slug = cwd_to_slug(src_row.get("cwd", "")) or cwd_to_slug(src_info.cwd)
+        if not slug and src_info.files:
+            slug = src_info.files[0].parent.name
+        if not slug:
+            raise RuntimeError(
+                "无法确定目标 projects 子目录（会话记录里 cwd 为空），"
+                "为避免正文落到 projects 根目录导致客户端打不开，已中止；请回滚本次迁移"
+            )
+        dst_dir = dst_ep.projects_dir / slug
     dst_dir.mkdir(parents=True, exist_ok=True)
+    if dst_dir == dst_ep.projects_dir:
+        raise RuntimeError("目标目录退化成 projects 根目录，已中止（请回滚本次迁移）")
 
     copied = []
     for f in src_info.files:
@@ -1743,7 +1820,8 @@ def print_session_table(ep: EditionPaths, rows, quick=True):
     for i, r in enumerate(rows, 1):
         sid = r["id"]
         files = find_project_files(ep, sid)
-        size = sum(f.stat().st_size for f in files if f.exists())
+        # 必须递归：tool-results 是目录，stat().st_size 只会返回 ~4KB
+        size = sum(path_size(f) for f in files if f.exists())
         title = (r.get("custom_title") or r.get("title") or "").strip() or "(无标题)"
         print(
             f"  {pad(i, 6)}{pad(sid[:8], 11)}{pad(fmt_time(r.get('last_activity_at')), 14)}"
@@ -1782,7 +1860,7 @@ def interactive():
     print("WorkBuddy 单对话跨版本迁移")
     print("=" * 70)
 
-    if not require_clients_closed():
+    if not _clients_closed_or_force():
         sys.exit(2)
 
     src_name = choose_edition("\n【第 1 步】选择【源版本】（对话当前所在的版本）")
@@ -1878,7 +1956,7 @@ def main():
         return
 
     # 显式指定对话 id
-    if not args.dry_run and not require_clients_closed(args.force):
+    if not args.dry_run and not _clients_closed_or_force(args.force):
         sys.exit(2)
 
     dst_ep = resolve_edition(args.dst)
@@ -1903,6 +1981,13 @@ if __name__ == "__main__":
     except RuntimeError as e:
         # 备份/复制阶段的业务性中止：给出人话提示，不打 traceback
         print(f"\n❌ {e}")
+        sys.exit(1)
+    except sqlite3.Error as e:
+        # 跨库 INSERT 撞上目标库新增的 NOT NULL 无默认值列等情况：
+        # 给可操作提示而不是 traceback
+        print(f"\n❌ 数据库写入失败：{e}")
+        print("   常见原因：目标版本库结构比源版本新（多了 NOT NULL 且无默认值的列）。")
+        print("   处理：用 --rollback <备份标签> 回滚，或先用 --backups 查看备份。")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n已中断")

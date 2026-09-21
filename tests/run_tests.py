@@ -347,6 +347,75 @@ def main():
             df = sorted(p.name for p in dst_dirs[0].rglob("*") if p.is_file())
             check("目录内文件齐全", bool(sf) and sf == df, f"{sf} vs {df}")
 
+    # ---------- 14. 跨账号 + copy：源必须保留 ----------
+    print("\n[14] 跨账号 + --mode copy：源对话必须保留（不能退化成归属转移）")
+    csid, _ctitle = pick_test_session(home)
+    other_uid = "other-uid-0000-1111-2222-333344445555"
+    dom_uid = _current_uid(home, "domestic")
+    if csid and dom_uid:
+        _remove_from_intl(home, csid)
+        _set_uid(home, "domestic", csid, other_uid)
+        before_n = db_rows(home, "domestic")
+        r = run(["--from", "domestic", "--to", "domestic", "--session-id", csid,
+                 "--mode", "copy", "--target-uid", dom_uid, "--yes", "--force"], home)
+        check("跨账号 copy 可执行", r.returncode == 0, r.stderr[-300:])
+        src_row = db_rows(home, "domestic", csid)
+        check("copy 后源对话仍在", src_row is not None)
+        check("copy 后源归属没被改走", src_row is not None and src_row[1] == other_uid,
+              f"got={src_row[1] if src_row else None}")
+        check("copy 后对话数 +1", db_rows(home, "domestic") == before_n + 1,
+              f"{before_n} → {db_rows(home, 'domestic')}")
+        clone_sid = _find_clone_sid(home, "domestic", csid)
+        if clone_sid:
+            crow = db_rows(home, "domestic", clone_sid)
+            check("副本归属目标账号", crow and crow[1] == dom_uid,
+                  f"got={crow[1] if crow else None}")
+        tag = _last_backup_tag(home, "domestic")
+        if tag:
+            run(["--rollback", tag, "--yes"], home)
+        _set_uid(home, "domestic", csid, dom_uid)   # 还原现场
+
+    # ---------- 15. 软冲突覆盖：回滚要还原被删对话的 usage ----------
+    print("\n[15] 软冲突覆盖后回滚：被删对话的 session_usage 要还原")
+    fake_id = _make_same_title_session(home, sid, title)
+    if fake_id:
+        _ensure_usage(home, "intl", fake_id)
+        check("构造：被覆盖对话有 usage", _usage_exists(home, "intl", fake_id))
+        r = run(["--from", "domestic", "--to", "intl", "--session-id", sid,
+                 "--mode", "move", "--force"], home, stdin="y\ny\n")
+        check("覆盖执行成功", r.returncode == 0, r.stderr[-300:])
+        check("覆盖后旧对话已删除", db_rows(home, "intl", fake_id) is None)
+        tag = _last_backup_tag(home, "intl")
+        if tag:
+            rr = run(["--rollback", tag, "--yes"], home)
+            check("覆盖场景回滚成功", rr.returncode == 0, rr.stderr[-300:])
+            check("回滚后旧对话恢复", db_rows(home, "intl", fake_id) is not None)
+            check("回滚后旧对话 usage 恢复", _usage_exists(home, "intl", fake_id))
+        _remove_from_intl(home, fake_id)
+
+    # ---------- 16. cwd 为空：正文不得落到 projects 根目录 ----------
+    print("\n[16] 会话 cwd 为空时，正文不得落到 projects 根目录")
+    esid, _etitle = first_session(home, "domestic")
+    if esid:
+        origin_cwd = _get_cwd(home, "domestic", esid)
+        _remove_from_intl(home, esid)
+        _set_cwd(home, "domestic", esid, "")
+        r = run(["--from", "domestic", "--to", "intl", "--session-id", esid,
+                 "--mode", "copy", "--yes", "--force"], home)
+        root_hits = sorted((home / ".workbuddy-ai" / "projects").glob(f"{esid}.*"))
+        check("正文没有落到 projects 根目录", not root_hits, str(root_hits))
+        if r.returncode == 0:
+            check("cwd 为空时仍能放进正确子目录",
+                  len(project_files(home, "intl", esid)) >= 1,
+                  f"{len(project_files(home, 'intl', esid))} 个文件")
+        else:
+            check("cwd 为空时明确报错而非静默成功",
+                  ("projects" in r.stdout or "cwd" in r.stdout), r.stdout[-300:])
+        _set_cwd(home, "domestic", esid, origin_cwd)   # 还原
+
+    # ---------- 17. migrate.py 单元测试（不依赖 fixture 数据） ----------
+    unit_tests(home)
+
     # ---------- 汇总 ----------
     print("\n" + "=" * 70)
     print(f"结果: 通过 {len(PASS)} / 失败 {len(FAIL)}")
@@ -409,6 +478,65 @@ def _rm(p):
         p.unlink()
 
 
+def _usage_exists(home, edition, sid):
+    """某版本 fixture 里该对话是否还有 session_usage 记录"""
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    try:
+        n = c.execute(
+            "SELECT COUNT(*) FROM session_usage WHERE session_id = ?", (sid,)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        n = 0
+    c.close()
+    return n > 0
+
+
+def _ensure_usage(home, edition, sid):
+    """给某条对话补一条 session_usage（用于验证覆盖/回滚是否保住它）
+
+    表里有 used / size / updated_at 等 NOT NULL 列，所以直接照抄一条已有记录
+    再改 session_id，比自己拼空值更容易满足约束。
+    """
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    try:
+        cols = [d[0] for d in c.execute("SELECT * FROM session_usage LIMIT 1").description]
+        exist = c.execute("SELECT * FROM session_usage LIMIT 1").fetchone()
+        row = dict(zip(cols, exist)) if exist else {k: None for k in cols}
+        row["session_id"] = sid
+        for k, v in (("used", 1), ("size", 1), ("updated_at", 1789000000000)):
+            if k in cols and not row.get(k):
+                row[k] = v
+        ks = [k for k in row if k in cols]
+        c.execute(
+            f"INSERT OR REPLACE INTO session_usage ({','.join(ks)}) "
+            f"VALUES ({','.join('?' * len(ks))})",
+            [row[k] for k in ks],
+        )
+        c.commit()
+    except sqlite3.Error as e:
+        print(f"  ⚠️  构造 usage 失败: {e}")
+    finally:
+        c.close()
+
+
+def _get_cwd(home, edition, sid):
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    r = c.execute("SELECT cwd FROM sessions WHERE id = ?", (sid,)).fetchone()
+    c.close()
+    return r[0] if r else None
+
+
+def _set_cwd(home, edition, sid, cwd):
+    db = home / (".workbuddy-ai" if edition == "intl" else ".workbuddy") / "workbuddy.db"
+    c = sqlite3.connect(str(db))
+    c.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (cwd, sid))
+    c.commit()
+    c.close()
+
+
 def _make_same_title_session(home, sid, title):
     """在目标库造一条同标题、不同 id 的旧对话，返回其 id"""
     import json
@@ -447,6 +575,121 @@ def _make_same_title_session(home, sid, title):
         encoding="utf-8",
     )
     return fake
+
+
+def unit_tests(home):
+    """migrate.py / migrate_session.py 的纯函数级用例（不依赖 fixture 里的真实会话）"""
+    import json as _json
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+
+    print("\n[17] 单元级用例（migrate.py / migrate_session.py）")
+    tmp = Path(_tf.mkdtemp(prefix="wb-unit-"))
+    old_env = os.environ.get("WORKBUDDY_MIGRATE_HOME")
+    os.environ["WORKBUDDY_MIGRATE_HOME"] = str(tmp)
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        for m in ("migrate", "migrate_session"):
+            sys.modules.pop(m, None)
+        import migrate
+        import migrate_session as ms
+
+        # --- 1) user_id 判定不能只看"含连字符" ---
+        check("UUID 形态目录算账号",
+              migrate._looks_like_uid("eadd8ba3-4fd7-46e0-9027-854ef5696bd3"))
+        check("普通带连字符目录不算账号",
+              not migrate._looks_like_uid("projects-backup"))
+        check("非 UUID 短串不算账号", not migrate._looks_like_uid("abc-def"))
+
+        # --- 2) Memory 重复迁移不得重复追加 ---
+        mem = tmp / "memory"
+        mem.mkdir(parents=True, exist_ok=True)
+        migrate.MEMORY_DIR = mem
+        suid, duid = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"
+
+        def _blk(t):
+            return f"<!-- RAW_JSON_START {{'memoryBlock':'{t}'}} RAW_JSON_END -->".replace("'", '"')
+
+        (mem / f"{suid}_memory.md").write_text("# 源\n" + _blk("源账号记忆"), encoding="utf-8")
+        (mem / f"{duid}_memory.md").write_text("# 目标\n" + _blk("目标自己的记忆"), encoding="utf-8")
+        migrate.migrate_memory(suid, duid)
+        migrate.migrate_memory(suid, duid)   # 故意再跑一次
+        txt = (mem / f"{duid}_memory.md").read_text(encoding="utf-8")
+        check("Memory 迁移后含源块", "源账号记忆" in txt)
+        check("重复迁移不重复追加", txt.count("源账号记忆") == 1,
+              f"出现 {txt.count('源账号记忆')} 次")
+
+        # --- 3) home 被覆盖时不得读真实机器 storage.json ---
+        sp_ = migrate._get_storage_json_path()
+        check("fixture home 下不会读到真实机器 storage.json",
+              sp_ is None or str(tmp) in str(sp_), f"got={sp_}")
+
+        # --- 4) 数据库备份走 sqlite backup API ---
+        dbp = tmp / "workbuddy.db"
+        c = sqlite3.connect(str(dbp))
+        c.execute("CREATE TABLE t (a TEXT)")
+        c.execute("INSERT INTO t VALUES ('x')")
+        c.commit()
+        c.close()
+        bak = tmp / "bak.db"
+        ok = migrate._backup_db(dbp, bak)
+        c2 = sqlite3.connect(str(bak))
+        n = c2.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        c2.close()
+        check("数据库备份用 backup API 且内容完整", ok and n == 1)
+
+        # --- 5) 含中文的 mcp.json 必须按 utf-8 解析 ---
+        cdir = tmp / "connectors" / "eadd8ba3-4fd7-46e0-9027-854ef5696bd3"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "mcp.json").write_text(
+            _json.dumps({"mcpServers": {"中文服务": {"command": "x"}}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        migrate.CONNECTORS_DIR = tmp / "connectors"
+        info = migrate.get_connector_info()
+        check("中文 mcp.json 能解析出 server",
+              any(v.get("mcp_servers") == 1 for v in info.values()), str(info))
+
+        # --- 6) 正文 id 改写只动 sessionId 字段，不动正文文本 ---
+        old_sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        new_sid = "11111111-2222-3333-4444-555555555555"
+        jf = tmp / "s.jsonl"
+        jf.write_text(
+            '{"sessionId":"' + old_sid + '","text":"引用旧 id ' + old_sid + '"}\n',
+            encoding="utf-8",
+        )
+        ms._rewrite_session_id(jf, old_sid, new_sid)
+        t = jf.read_text(encoding="utf-8")
+        check("sessionId 字段已改写", f'"sessionId":"{new_sid}"' in t, t)
+        check("正文里同串 id 不被误改", t.count(old_sid) == 1, t)
+
+        # --- 7) --rollback 与 --source 互斥；--rollback 支持 --yes ---
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        r = _sp.run(
+            [sys.executable, str(ROOT / "scripts" / "migrate.py"),
+             "--rollback", "x", "--source", "y"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, timeout=60,
+        )
+        out = r.stdout + r.stderr
+        check("--rollback 与 --source 同给时报错", r.returncode != 0 and "不能与" in out, out[-200:])
+
+        r = _sp.run(
+            [sys.executable, str(ROOT / "scripts" / "migrate.py"),
+             "--rollback", "no-such-tag", "--yes"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, timeout=60,
+        )
+        out = r.stdout + r.stderr
+        check("--rollback --yes 不再等待人工确认", "备份不存在" in out, out[-200:])
+    finally:
+        if old_env is None:
+            os.environ.pop("WORKBUDDY_MIGRATE_HOME", None)
+        else:
+            os.environ["WORKBUDDY_MIGRATE_HOME"] = old_env
+        _sh.rmtree(str(tmp), ignore_errors=True)
 
 
 if __name__ == "__main__":
