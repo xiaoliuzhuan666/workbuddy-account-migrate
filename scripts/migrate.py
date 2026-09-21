@@ -9,6 +9,8 @@ WorkBuddy 账号迁移工具
   python3 migrate.py --diagnose                # 诊断模式：查看所有账号数据分布
   python3 migrate.py --source USER_ID          # 指定源账号迁移（高级用户）
   python3 migrate.py --source USER_ID --yes    # 跳过确认直接迁移
+  python3 migrate.py --intl                    # 强制使用国际版数据目录 ~/.workbuddy-ai
+  python3 migrate.py --dir PATH                # 显式指定数据目录（优先级高于 --intl）
   python3 migrate.py --rollback TIMESTAMP      # 回滚到指定备份
   python3 migrate.py --restore-tasks           # 恢复历史任务到当前 session
   python3 migrate.py --restore-tasks --session SESSION_ID  # 恢复指定 session 的任务
@@ -33,31 +35,69 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+def _home_override() -> str:
+    """WORKBUDDY_MIGRATE_HOME 的值（未设置时返回空串）"""
+    return os.environ.get("WORKBUDDY_MIGRATE_HOME", "")
+
+
+def _home() -> Path:
+    """home 目录，支持环境变量覆盖（测试时指向临时 fixture，不碰真实数据）"""
+    env = _home_override()
+    return Path(env) if env else Path.home()
+
+
+# user_id 形如 eadd8ba3-4fd7-46e0-9027-854ef5696bd3（8-4-4-4-12 十六进制）。
+# 只凭"目录名里有连字符"判断会把 projects-backup 之类普通目录当成账号。
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _looks_like_uid(name: str) -> bool:
+    """判断目录名是否像一个 WorkBuddy user_id"""
+    return bool(UUID_RE.match(name or ""))
+
+
 def _find_workbuddy_dir():
     """自动探测数据目录：国际版用 ~/.workbuddy-ai，国内版用 ~/.workbuddy"""
-    ai_dir = Path.home() / ".workbuddy-ai"
+    ai_dir = _home() / ".workbuddy-ai"
     # 目录存在且非空即视为国际版（不依赖 DB 是否已生成）
     if ai_dir.is_dir() and any(ai_dir.iterdir()):
         return ai_dir
-    return Path.home() / ".workbuddy"
+    return _home() / ".workbuddy"
+
+
+def _setup_paths(edition):
+    """按版本切换到对应的 WorkBuddy 数据目录
+
+    Args:
+        edition: "domestic" 使用 ~/.workbuddy，其他值（"intl"）使用 ~/.workbuddy-ai
+
+    等价于 _set_workbuddy_dir(_home() / "<版本目录>")，与 _find_workbuddy_dir()
+    共用同一套派生路径推导，避免两处逻辑各自演化。
+    """
+    _set_workbuddy_dir(_home() / (".workbuddy-ai" if edition == "intl" else ".workbuddy"))
 
 
 def _get_storage_json_path():
     """storage.json 候选路径：仅返回确实存在的路径，否则返回 None
 
     国内版登录态权威来源。国际版不使用此文件（改用 account-snapshot.json）。
+
+    候选路径一律基于 _home()：一旦用 WORKBUDDY_MIGRATE_HOME 指向 fixture，
+    就不会再去读真实机器的平台路径，避免把真实登录态带进测试/迁移。
     """
     import platform
     system = platform.system()
+    home = _home()
     candidates = []
     if system == "Darwin":
-        candidates.append(Path.home() / "Library" / "Application Support" / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
+        candidates.append(home / "Library" / "Application Support" / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
     elif system == "Windows":
         appdata = os.environ.get("APPDATA", "")
-        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        # home 被覆盖时，APPDATA 指向的是真实机器，必须改从 home 推导
+        base = Path(appdata) if (appdata and not _home_override()) else home / "AppData" / "Roaming"
         candidates.append(base / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
     else:
-        config_home = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        config_home = os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))
         candidates.append(Path(config_home) / "WorkBuddy" / "User" / "globalStorage" / "storage.json")
     for p in candidates:
         if p.exists():
@@ -110,12 +150,14 @@ def get_current_user_id():
     login_uid = ""
 
     # 方法1a：从 storage.json 读取（国内版，登录态权威来源）
-    try:
-        with open(STORAGE_JSON, encoding="utf-8") as f:
-            data = json.load(f)
-        login_uid = data.get("genie.userId", "")
-    except Exception:
-        pass
+    # 注意：_get_storage_json_path() 可能返回 None（平台路径不存在）
+    if STORAGE_JSON is not None:
+        try:
+            with open(STORAGE_JSON, encoding="utf-8") as f:
+                data = json.load(f)
+            login_uid = data.get("genie.userId", "")
+        except Exception:
+            pass
 
     # 方法1b：国际版 account-snapshot.json（登录态权威来源）
     if not login_uid and ACCOUNT_SNAPSHOT.exists():
@@ -130,6 +172,7 @@ def get_current_user_id():
     # 方法2：从 DB 推断——用 session 数量最多的 user_id（而非最新 session）
     # 避免被偶发的旧账号 session 欺骗
     if DB_PATH.exists():
+        conn = None
         try:
             conn = sqlite3.connect(str(DB_PATH))
             cur = conn.cursor()
@@ -138,11 +181,13 @@ def get_current_user_id():
                 "WHERE user_id IS NOT NULL GROUP BY user_id ORDER BY cnt DESC LIMIT 1"
             )
             row = cur.fetchone()
-            conn.close()
             if row and row[0]:
                 db_uid = row[0]
         except Exception:
             pass
+        finally:
+            if conn is not None:
+                conn.close()
 
     # 交叉验证
     if login_uid and db_uid and login_uid != db_uid:
@@ -188,8 +233,8 @@ def get_all_user_ids():
     if CONNECTORS_DIR.exists():
         for d in CONNECTORS_DIR.iterdir():
             if d.is_dir() and d.name not in ("default", "skills") and not d.name.startswith("."):
-                # 检查是否是 UUID 格式
-                if "-" in d.name:
+                # 只认 UUID 形态的目录（"含连字符"会把普通目录误判成账号）
+                if _looks_like_uid(d.name):
                     user_ids.add(d.name)
 
     return sorted(user_ids)
@@ -226,25 +271,26 @@ def get_connector_info():
     info = {}
     if CONNECTORS_DIR.exists():
         for d in CONNECTORS_DIR.iterdir():
-            if d.is_dir() and d.name not in ("default", "skills") and "-" in d.name:
+            if d.is_dir() and d.name not in ("default", "skills") and _looks_like_uid(d.name):
                 mcp_file = d / "mcp.json"
                 states_file = d / "connector-states.json"
                 mcp_servers = 0
                 states_count = 0
                 if mcp_file.exists():
                     try:
-                        with open(mcp_file) as f:
+                        # 必须显式 utf-8：Windows 默认 GBK，含中文的 mcp.json 会解码失败
+                        with open(mcp_file, encoding="utf-8") as f:
                             mcp_data = json.load(f)
                         mcp_servers = len(mcp_data.get("mcpServers", {}))
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"  ⚠️  读取失败 {mcp_file.name}: {e}")
                 if states_file.exists():
                     try:
-                        with open(states_file) as f:
+                        with open(states_file, encoding="utf-8") as f:
                             states_data = json.load(f)
                         states_count = len(states_data) if isinstance(states_data, dict) else 0
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"  ⚠️  读取失败 {states_file.name}: {e}")
                 info[d.name] = {"mcp_servers": mcp_servers, "connector_states": states_count}
     return info
 
@@ -292,6 +338,31 @@ def diagnose():
         print(f"\n   执行命令: python3 migrate.py --source {other_uids[0]}")
 
 
+def _backup_db(src: Path, dst: Path) -> bool:
+    """用 sqlite backup API 复制数据库（能带上 WAL 里还没落盘的数据）
+
+    直接 shutil.copy2 主库文件只能拿到上次 checkpoint 的快照：客户端崩溃或
+    未退出时，最近的会话还在 workbuddy.db-wal 里，备份会是陈旧的。
+    失败时返回 False，调用方应提示用户。
+    """
+    src_conn = None
+    dst_conn = None
+    try:
+        src_conn = sqlite3.connect(src.as_uri() + "?mode=ro", uri=True)
+        dst_conn = sqlite3.connect(str(dst))
+        with dst_conn:
+            src_conn.backup(dst_conn)
+        return True
+    except Exception as e:
+        print(f"  ⚠️  数据库在线备份失败（{e}）")
+        return False
+    finally:
+        if src_conn is not None:
+            src_conn.close()
+        if dst_conn is not None:
+            dst_conn.close()
+
+
 def create_backup(target_uid, timestamp):
     """创建备份"""
     BACKUP_DIR.mkdir(exist_ok=True)
@@ -299,10 +370,15 @@ def create_backup(target_uid, timestamp):
     backup_path = BACKUP_DIR / backup_tag
     backup_path.mkdir(exist_ok=True)
 
-    # 备份数据库
+    # 备份数据库（必须带 WAL，否则客户端没退出时备份是陈旧快照）
     if DB_PATH.exists():
-        shutil.copy2(str(DB_PATH), str(backup_path / "workbuddy.db"))
-        print(f"  ✅ 已备份数据库 → {backup_path / 'workbuddy.db'}")
+        if _backup_db(DB_PATH, backup_path / "workbuddy.db"):
+            print(f"  ✅ 已备份数据库（含 WAL）→ {backup_path / 'workbuddy.db'}")
+        else:
+            # 在线备份失败（例如源库被独占锁），退回文件复制，但明确告知风险
+            shutil.copy2(str(DB_PATH), str(backup_path / "workbuddy.db"))
+            print(f"  ⚠️  已退回文件复制备份 → {backup_path / 'workbuddy.db'}")
+            print(f"     （可能不含 WAL 中未落盘的数据，回滚前请确认客户端已完全退出）")
 
     # 备份 Memory
     mem_file = MEMORY_DIR / f"{target_uid}_memory.md"
@@ -325,11 +401,29 @@ def create_backup(target_uid, timestamp):
         "target_uid": target_uid,
         "created_at": datetime.now().isoformat(),
     }
-    with open(backup_path / "meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
+    with open(backup_path / "meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
 
     print(f"  📦 备份标签: {backup_tag}")
     return backup_tag
+
+
+def _wal_checkpoint(cur, label="") -> bool:
+    """执行 WAL checkpoint，返回是否完全成功
+
+    PRAGMA wal_checkpoint 返回 (busy, log, checkpointed)；busy != 0 表示
+    有其他连接占用了锁、checkpoint 没做完——此时读到/写到的可能不是最新状态，
+    不能当成"验证通过"。
+    """
+    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    row = cur.fetchone() or (1, 0, 0)
+    busy = row[0] if len(row) > 0 else 1
+    if busy:
+        print(f"  ⚠️  WAL checkpoint 未完成（{label}busy={busy}）："
+              f"有其他进程占用数据库锁，请关闭 WorkBuddy 客户端后重试")
+        return False
+    print(f"  📋 WAL checkpoint 完成（{label}log={row[1]}, checkpointed={row[2]}）")
+    return True
 
 
 def migrate_sessions(source_uid, target_uid):
@@ -338,7 +432,7 @@ def migrate_sessions(source_uid, target_uid):
     cur = conn.cursor()
 
     # 先 checkpoint WAL（确保读取到最新数据）
-    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    checkpoint_ok = _wal_checkpoint(cur, "迁移前 ")
 
     # 统计
     cur.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (source_uid,))
@@ -355,15 +449,16 @@ def migrate_sessions(source_uid, target_uid):
     conn.commit()
 
     # 迁移后再 checkpoint WAL（确保写入持久化）
-    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    checkpoint_result = cur.fetchone()
-    print(f"  📋 WAL checkpoint: {checkpoint_result}")
+    checkpoint_ok = _wal_checkpoint(cur, "迁移后 ") and checkpoint_ok
 
     # 验证：确认源账号不再有 session
     cur.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (source_uid,))
     remaining = cur.fetchone()[0]
     if remaining > 0:
         print(f"  ⚠️  警告：源账号仍有 {remaining} 个 session 未迁移！")
+    elif not checkpoint_ok:
+        # checkpoint 没做完的话，这次查询的结果本身也不可信，不能报"验证通过"
+        print(f"  ⚠️  校验未完成：WAL checkpoint 被锁占用，无法确认迁移结果是否已落盘")
     else:
         print(f"  ✅ 验证通过：源账号 session 已全部迁移")
 
@@ -377,7 +472,7 @@ RAW_JSON_RE = re.compile(r"<!--\s*RAW_JSON_START(.*?)RAW_JSON_END\s*-->", re.DOT
 
 
 def _extract_memory_block(content):
-    """从 memory 文件中提取 memoryBlock 内容，解析失败返回 None"""
+    """从 memory 文件中提取【首个】memoryBlock 内容，解析失败返回 None"""
     m = RAW_JSON_RE.search(content)
     if not m:
         return None
@@ -386,6 +481,24 @@ def _extract_memory_block(content):
         return data.get("memoryBlock", "")
     except Exception:
         return None
+
+
+def _extract_memory_blocks(content):
+    """提取 memory 文件中【所有】RAW_JSON 块里的 memoryBlock 文本
+
+    只比较首个块是不够的：迁移过一次后目标文件里会有两个块，再跑一次迁移时
+    首块是目标自己的内容，与源块不同 → 同一个块被追加两遍。
+    """
+    blocks = []
+    for m in RAW_JSON_RE.finditer(content or ""):
+        try:
+            data = json.loads(m.group(1).strip())
+        except Exception:
+            continue
+        block = data.get("memoryBlock", "")
+        if block:
+            blocks.append(block)
+    return blocks
 
 
 def migrate_memory(source_uid, target_uid):
@@ -404,29 +517,44 @@ def migrate_memory(source_uid, target_uid):
         return
 
     if not dst_file.exists():
-        # 目标不存在，直接复制
+        # 目标不存在，直接复制（memory 目录本身也可能不存在）
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
         dst_file.write_text(src_content, encoding="utf-8")
         print(f"  ✅ 复制 Memory（目标为空，直接复制 {len(src_content)} 字符）")
         return
 
     # 目标已存在，追加去重
     dst_content = dst_file.read_text(encoding="utf-8").strip()
-    src_block = _extract_memory_block(src_content)
-    dst_block = _extract_memory_block(dst_content)
+    src_blocks = _extract_memory_blocks(src_content)
+    dst_blocks = _extract_memory_blocks(dst_content)
 
-    if src_block is not None and dst_block is not None:
+    if src_blocks and dst_blocks:
         # 结构化 memory：按 memoryBlock 语义块去重（避免空模板按行误追加）
-        if not src_block.strip():
-            print(f"  ⏭️  源账号 Memory 为空模板，跳过")
+        # 与目标里【所有】已有块比对，保证重复执行不会追加第二遍
+        pending = [b for b in src_blocks if b.strip() and b not in dst_blocks]
+        if not pending:
+            print(f"  ⏭️  源账号 Memory 的 memoryBlock 已存在于目标，跳过")
             return
-        if src_block == dst_block:
-            print(f"  ⏭️  源/目标 Memory 的 memoryBlock 相同，跳过")
+
+        # 只追加尚未存在的那些块（完整注释块，保持 Markdown 合法）
+        pending_set = set(pending)
+        chunks = []
+        for m in RAW_JSON_RE.finditer(src_content):
+            try:
+                data = json.loads(m.group(1).strip())
+            except Exception:
+                continue
+            if data.get("memoryBlock", "") in pending_set:
+                chunks.append(m.group(0))
+        if not chunks:
+            print(f"  ⏭️  源账号 Memory 无可追加内容，跳过")
             return
-        # 追加源文件的 RAW_JSON 语义块（完整注释块，保持 Markdown 合法）
-        m = RAW_JSON_RE.search(src_content)
+
         with open(dst_file, "a", encoding="utf-8") as f:
-            f.write(f"\n\n---\n## 迁移自 {source_uid[:12]}...\n\n{m.group(0)}\n")
-        print(f"  ✅ 追加源账号 Memory 语义块")
+            f.write(f"\n\n---\n## 迁移自 {source_uid[:12]}...\n\n" + "\n\n".join(chunks) + "\n")
+        print(f"  ✅ 追加源账号 Memory 语义块（{len(chunks)} 块）")
+        print(f"  ⚠️  注意：目标文件现在有 {len(dst_blocks) + len(chunks)} 个 RAW_JSON 块，"
+              f"WorkBuddy 客户端是否合并读取多个块尚未验证，请打开客户端确认记忆已生效")
         return
 
     # 旧格式/无 RAW_JSON：退回按行去重
@@ -582,7 +710,7 @@ def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=Fa
     print(f"  🔙 回滚命令: python3 migrate.py --rollback {backup_tag}")
 
 
-def rollback(backup_tag):
+def rollback(backup_tag, skip_confirm=False):
     """回滚到指定备份"""
     backup_path = BACKUP_DIR / backup_tag
     if not backup_path.exists():
@@ -592,7 +720,7 @@ def rollback(backup_tag):
     # 读取元数据
     meta_file = backup_path / "meta.json"
     if meta_file.exists():
-        with open(meta_file) as f:
+        with open(meta_file, encoding="utf-8") as f:
             meta = json.load(f)
         target_uid = meta.get("target_uid", "")
     else:
@@ -606,7 +734,10 @@ def rollback(backup_tag):
     print(f"  目标账号: {target_uid}")
     print()
 
-    answer = input("确认回滚？这将覆盖当前数据！(y/N): ").strip().lower()
+    if skip_confirm:
+        answer = "y"
+    else:
+        answer = input("确认回滚？这将覆盖当前数据！(y/N): ").strip().lower()
     if answer != "y":
         print("已取消")
         return
@@ -617,28 +748,68 @@ def rollback(backup_tag):
         shutil.copy2(str(db_backup), str(DB_PATH))
         print("  ✅ 已恢复数据库")
 
-    # 恢复 Memory
-    if target_uid:
+    if not target_uid:
+        # target_uid 为空时 CONNECTORS_DIR / target_uid 会退化成整个 connectors 目录，
+        # 此时绝不能做任何删除/覆盖操作，否则会误删全部连接器配置。
+        print("  ⚠️  备份缺少目标账号信息（meta.json 不完整），跳过 Memory / Connectors 恢复")
+        print("     （target_uid 为空时路径会退化成整个目录，不能做任何删除操作）")
+    else:
+        # 恢复 Memory：只要备份里有就恢复，不要求目标文件当前必须存在
         mem_backup = backup_path / f"{target_uid}_memory.md"
-        mem_target = MEMORY_DIR / f"{target_uid}_memory.md"
-        if mem_backup.exists() and mem_target.exists():
-            shutil.copy2(str(mem_backup), str(mem_target))
+        if mem_backup.exists():
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(mem_backup), str(MEMORY_DIR / f"{target_uid}_memory.md"))
             print("  ✅ 已恢复 Memory")
 
-    # 恢复 Connectors
-    conn_backup = backup_path / target_uid
-    conn_target = CONNECTORS_DIR / target_uid
-    if conn_backup.exists() and conn_target.exists():
-        if conn_target.exists():
-            shutil.rmtree(str(conn_target))
-        shutil.copytree(str(conn_backup), str(conn_target))
-        print("  ✅ 已恢复 Connectors")
+        # 恢复 Connectors：同样只看备份里有没有。
+        # 目标目录当前不存在是常见情况（比如迁移后手动清理过），此时应当重建而不是跳过。
+        conn_backup = backup_path / target_uid
+        conn_target = CONNECTORS_DIR / target_uid
+        if conn_backup.exists():
+            if conn_target.exists():
+                shutil.rmtree(str(conn_target))
+            shutil.copytree(str(conn_backup), str(conn_target))
+            print("  ✅ 已恢复 Connectors")
+        else:
+            print("  ⏭️  备份中没有 Connector 数据，跳过")
 
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 
 
-def interactive_migrate():
+def interactive_migrate(skip_edition_prompt=False):
     """交互式迁移向导：列出所有账号，用户分别选择源和目标"""
+
+    # 版本选择：默认沿用自动探测结果，--intl 时跳过询问
+    detected = "intl" if WORKBUDDY_DIR.name == ".workbuddy-ai" else "domestic"
+    if not skip_edition_prompt:
+        default_choice = "2" if detected == "intl" else "1"
+        print("=" * 70)
+        print("WorkBuddy 版本选择")
+        print("=" * 70)
+        print()
+        print("  1. 国内版（数据目录 ~/.workbuddy）")
+        print("  2. 国际版（数据目录 ~/.workbuddy-ai）")
+        print(f"\n  当前自动探测：{'国际版' if detected == 'intl' else '国内版'}（{WORKBUDDY_DIR}）")
+        print()
+        while True:
+            try:
+                choice = input(f"请选择 WorkBuddy 版本（输入序号，默认 {default_choice}）: ").strip()
+                if not choice:
+                    break
+                if choice == "2":
+                    _setup_paths("intl")
+                    print("  -> 已选择国际版\n")
+                    break
+                elif choice == "1":
+                    _setup_paths("domestic")
+                    print("  -> 已选择国内版\n")
+                    break
+                else:
+                    print("  请输入 1 或 2")
+            except (EOFError, KeyboardInterrupt):
+                print("\n已取消")
+                return
+
     all_uids = get_all_user_ids()
     session_counts = get_session_counts()
     memory_sizes = get_memory_sizes()
@@ -1040,10 +1211,11 @@ def generate_task_create_commands(target_session_id=None):
 def main():
     parser = argparse.ArgumentParser(description="WorkBuddy 账号迁移工具")
     parser.add_argument("--dir", type=str, help="WorkBuddy 数据目录（默认自动探测：~/.workbuddy-ai 或 ~/.workbuddy）")
+    parser.add_argument("--intl", action="store_true", help="强制使用国际版数据目录 ~/.workbuddy-ai（默认自动探测，--dir 优先级更高）")
     parser.add_argument("--diagnose", "-d", action="store_true", help="诊断模式：查看所有账号数据分布")
     parser.add_argument("--source", "-s", type=str, help="源账号 user_id（要迁移出的账号）")
     parser.add_argument("--target", "-t", type=str, help="目标账号 user_id（接收数据的账号，默认从登录态 storage.json / account-snapshot.json 自动推断）")
-    parser.add_argument("--yes", "-y", action="store_true", help="跳过确认直接迁移")
+    parser.add_argument("--yes", "-y", action="store_true", help="跳过确认直接迁移/回滚")
     parser.add_argument("--rollback", "-r", type=str, help="回滚到指定备份标签")
     parser.add_argument("--restore-tasks", action="store_true", help="恢复历史任务到当前 session")
     parser.add_argument("--list-tasks", action="store_true", help="列出所有历史任务概览")
@@ -1052,13 +1224,22 @@ def main():
 
     args = parser.parse_args()
 
+    # 目录优先级：--dir > --intl > 自动探测（模块导入时已按 _find_workbuddy_dir() 算好）
     if args.dir:
         _set_workbuddy_dir(args.dir)
+    elif args.intl:
+        _setup_paths("intl")
+
+    # 互斥参数检查：以前 --source 与 --rollback 一起给时 rollback 会静默优先
+    if args.rollback and (args.source or args.restore_tasks or args.list_tasks):
+        print("❌ --rollback 不能与 --source / --restore-tasks / --list-tasks 同时使用")
+        print("   请单独执行，例如：python3 migrate.py --rollback <TAG> --yes")
+        sys.exit(1)
 
     if args.diagnose:
         diagnose()
     elif args.rollback:
-        rollback(args.rollback)
+        rollback(args.rollback, skip_confirm=args.yes)
     elif args.list_tasks:
         list_tasks()
     elif args.restore_tasks:
@@ -1070,7 +1251,7 @@ def main():
         migrate(args.source, target_uid=args.target, skip_confirm=args.yes, target_is_manual=args.target is not None)
     else:
         # 无参数时进入交互式向导
-        interactive_migrate()
+        interactive_migrate(skip_edition_prompt=args.intl)
 
 
 if __name__ == "__main__":
