@@ -36,3 +36,6 @@ storage.json
 # 备份文件
 *.bak
 *.bak.*
+
+# ai
+/.workbuddy-ai

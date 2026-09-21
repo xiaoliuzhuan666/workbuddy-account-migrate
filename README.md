@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.4.0](https://img.shields.io/badge/Version-1.4.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.6.0](https://img.shields.io/badge/Version-1.6.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -47,6 +47,7 @@ WorkBuddy 切换账号 / 重新登录 / 换了腾讯云身份后，**之前的�
 |:---|:---|
 | ✅ 交互式向导 | 运行即用，列出所有账号，手动选择目标/源账号，无需知道 user_id |
 | ✅ 跨平台路径适配 | v1.4：storage.json 路径自动适配 macOS / Windows / Linux |
+| ✅ 国内版 / 国际版 | 交互式向导可选版本，或 `--intl` 参数指定国际版（`~/.workbuddy-ai`） |
 | ✅ Session 对话记录迁移 | 修改 SQLite 数据库中的 `user_id` 字段，对话记录全部回归 |
 | ✅ Memory 长期记忆合并 | 追加式去重合并，不会丢失当前账号已有记忆 |
 | ✅ Connector MCP 连接器合并 | JSON 深度合并，目标账号已有配置保留不动 |
@@ -65,6 +66,19 @@ python3 scripts/migrate.py
 ```
 
 运行效果：
+
+```
+======================================================================
+WorkBuddy 版本选择
+======================================================================
+
+  1. 国内版（数据目录 ~/.workbuddy）
+  2. 国际版（数据目录 ~/.workbuddy-ai）
+
+请选择 WorkBuddy 版本（输入序号，默认 1）:
+```
+
+选择版本后进入账号选择：
 
 ```
 ======================================================================
@@ -95,9 +109,20 @@ python3 scripts/migrate.py --source <USER_ID>
 # 显式指定目标账号（不依赖当前登录态推断，v1.4 新增）
 python3 scripts/migrate.py --source <USER_ID> --target <USER_ID>
 
+# 国际版（数据目录 ~/.workbuddy-ai）
+python3 scripts/migrate.py --intl
+python3 scripts/migrate.py --intl --diagnose
+python3 scripts/migrate.py --intl --source <USER_ID>
+
+# 显式指定数据目录（优先级高于 --intl）
+python3 scripts/migrate.py --dir ~/.workbuddy-ai
+
 # 回滚到指定备份
 python3 scripts/migrate.py --rollback <TAG>
 ```
+
+> **国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。其他命令和行为完全一致。
+> **目录优先级**：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空时判为国际版，否则国内版）。交互式向导还会让你确认一次版本。
 
 ### 迁移内容
 
@@ -109,6 +134,91 @@ python3 scripts/migrate.py --rollback <TAG>
 | Skills 技能 | `~/.workbuddy/skills/` | 无隔离 | ❌ | 全局共享，无需迁移 |
 | Automations 定时任务 | `workbuddy.db` automations 表 | 无 user_id | ❌ | 全局共享，无需迁移 |
 | Settings / MCP / Plugins | 全局配置文件 | 无隔离 | ❌ | 全局共享，无需迁移 |
+
+### 单对话跨版本迁移（v1.6.0）
+
+上面是「整个账号」的迁移。如果你只想把**某一个对话**从国内版搬到国际版（或反过来），用另一个脚本：
+
+```bash
+python3 scripts/migrate_session.py                 # 交互式向导，一步到位
+python3 scripts/migrate_session.py --list          # 先看看国内版有哪些对话
+python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSION_ID>
+```
+
+**与整账号迁移的区别**
+
+| | `migrate.py` | `migrate_session.py` |
+|:---|:---|:---|
+| 范围 | 整个账号（全部对话 + 记忆 + 连接器） | **一个对话** |
+| 版本 | 同一版本内 | **支持国内 ⇄ 国际** |
+| 默认语义 | 合并（源保留） | **移动（源删除）**，可 `--mode copy` |
+
+**⚠️ 迁移前必须关闭两个版本的 WorkBuddy 窗口**，脚本会检测并拒绝执行。原因：数据还在 WAL 里没落盘、客户端内存缓存会覆盖你的写入。
+
+**一个对话实际包含哪些东西**（少一样客户端就显示异常）：
+
+| 数据 | 位置 | 说明 |
+|:---|:---|:---|
+| session 行 | `workbuddy.db` sessions 表 | 跨库插入，`user_id` 改写为目标版本账号 |
+| 用量行 | `session_usage` 表 | token 统计 |
+| 工作区登记 | `workspaces` 表 | 否则客户端找不到路径 |
+| **对话正文** | `projects/{slug}/{id}.jsonl` | **不复制的话对话是空的** |
+| 工具结果 | `projects/{slug}/{id}/tool-results/*.txt` | 大工具输出外溢目录，缺失会丢内容 |
+
+**冲突处理**（目标已存在时询问，并展示差异帮你判断）：
+
+```
+⚠️  目标版本已存在【标题相同】但 ID 不同的对话
+  原因：标题一致但 id 不同，很可能是同一段对话被迁移过一次，
+       再次迁移会在客户端里出现两条看起来一样的对话。
+
+  指标          目标现有（将被覆盖）        源（将写入）
+  ─────────────────────────────────────────────────────────
+  ★ 最后活动    09-10 08:26                09-10 15:02
+  ★ 消息数      5 条（我 5 / AI 0）         26 条（我 3 / AI 23）
+  ★ 对话大小    453 B · 5 行               605.6 KB · 140 行
+    最后提问    老的提问内容                …
+  ─────────────────────────────────────────────────────────
+  → 源比目标新 6 小时 36 分钟，消息多 21 条，内容远超目标（约 1369 倍）
+  → 建议：覆盖（源更新且更完整）
+
+  请确认 [y] 覆盖 / [s] 不覆盖（跳过该对话） / [n] 不操作（取消）:
+```
+
+- **硬冲突**（ID 相同）：`覆盖` / `不操作`
+- **软冲突**（标题相同、ID 不同）：`覆盖` / `不覆盖` / `不操作`
+- 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
+
+**同版本复制**（`--from` 与 `--to` 相同）
+
+同一版本内有两种语义，脚本会自动判断：
+
+| 情况 | 行为 |
+|:---|:---|
+| 源对话属于**别的账号** | 只把 `user_id` 改到当前账号（归属转移） |
+| 源对话**已属于当前账号** | 克隆出一条新对话：新的 session id，标题加「（副本）」 |
+
+克隆会一并处理三件容易漏掉的事：正文文件按新 id 改名、正文内部每条消息的
+`"sessionId"` 全部改写为新 id、工具结果目录 `tool-results/` 一起复制。
+原对话保持不变，回滚只删副本、不动原对话。
+
+**参数**
+
+| 参数 | 说明 | 默认 |
+|:---|:---|:---|
+| `--from` / `--to` | 源/目标版本 `domestic`\|`intl` | `domestic` |
+| `--session-id` | 对话 id（支持前缀） | - |
+| `--mode` | `move`（迁移后删源）/ `copy`（保留） | **`move`** |
+| `--on-conflict` | `ask`/`skip`/`overwrite`/`newer`（无终端询问时 `ask` 降级为 `skip`） | `ask` |
+| `--dry-run` | 只打印计划不写盘 | 关 |
+| `--force` | 跳过"客户端必须关闭"检测 | 关 |
+| `--backups` / `--rollback TAG` | 查看备份 / 回滚 | - |
+
+回滚精确到单条，不影响其他对话：`python3 scripts/migrate_session.py --rollback <TAG>`。
+
+> ⚠️ **平台说明**：单对话迁移**仅 Windows 实测通过**（Windows 11 + Python 3.13）。
+> macOS / Linux 的路径逻辑沿用 `migrate.py` 的跨平台实现（路径走 pathlib、进程检测
+> Windows 用 `tasklist`、其他平台用 `ps`），但未经实测，欢迎提 Issue 反馈。
 
 ### 工作原理
 
@@ -126,10 +236,14 @@ python3 scripts/migrate.py --rollback <TAG>
 
 | 平台 | 状态 |
 |:---|:---|
-| WorkBuddy (macOS) | ✅ 已测试 |
-| WorkBuddy (Windows) | ✅ 已适配（v1.4，`%APPDATA%` 路径，欢迎实测反馈） |
-| WorkBuddy (Linux) | ✅ 已适配（v1.4，`XDG_CONFIG_HOME` 路径，欢迎实测反馈） |
+| WorkBuddy 国内版 (macOS) | ✅ 已测试 |
+| WorkBuddy 国内版 (Windows) | ✅ 已适配（v1.4，`%APPDATA%` 路径，欢迎实测反馈） |
+| WorkBuddy 国内版 (Linux) | ✅ 已适配（v1.4，`XDG_CONFIG_HOME` 路径，欢迎实测反馈） |
+| WorkBuddy 国际版 (Windows) | ✅ 已测试（v1.5，数据目录 `~/.workbuddy-ai/`，使用 `--intl` 参数） |
+| WorkBuddy 国际版 (macOS / Linux) | ⚠️ 理论支持，未实测 |
 | CodeBuddy CLI | ❌ 不适用（见下方说明） |
+
+> **国内版 vs 国际版**：国内版数据目录为 `~/.workbuddy/`，国际版为 `~/.workbuddy-ai/`。迁移工具默认操作国内版，加 `--intl` 参数操作国际版。交互式向导会提示选择版本。
 
 **为什么不支持 CodeBuddy CLI？** CodeBuddy CLI 的记忆按项目维度隔离（`~/.codebuddy/memories/{project-id}/`），对话记录按 `{sessionId}.jsonl` 独立文件存储，不依赖 `user_id` 过滤，**不存在账号切换后数据丢失的问题**。如果你是 CodeBuddy 用户遇到类似问题，欢迎提 Issue。
 
@@ -191,10 +305,21 @@ workbuddy-account-migrate/
 ├── .gitignore                             # 排除敏感文件
 ├── SKILL.md                               # WorkBuddy Skill 描述符
 ├── scripts/
-│   └── migrate.py                         # 核心迁移脚本
+│   ├── migrate.py                         # 整账号迁移（同版本内）
+│   └── migrate_session.py                 # 单对话迁移（支持跨版本，v1.6）
+├── tests/
+│   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
+│   └── run_tests.py                       # 端到端测试（61 项）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
+
+> 测试全部在临时 fixture 中运行，不会触碰真实数据目录。
+> `python3 tests/run_tests.py` 即可复现全部验证。
+>
+> ⚠️ **测试脚本仅 Windows 实测通过**（Windows 11 + Python 3.13）。fixture 复制的是本机真实
+> WorkBuddy 数据，其中 session 的 cwd 与 projects 目录名均为 Windows 路径格式。
+> macOS / Linux 未测试：本机若未安装并登录过 WorkBuddy，将造不出 fixture。
 
 ### 贡献
 
@@ -203,6 +328,58 @@ workbuddy-account-migrate/
 - Windows / Linux 实测反馈 → 欢迎 Issue
 
 ### 更新日志
+
+#### v1.6.0 (2026-09-10)
+
+**新增：`scripts/migrate_session.py` — 单对话跨版本迁移**
+
+只迁移**指定的一个对话**，并支持**国内版 ⇄ 国际版**双向：
+
+- 默认 `move`（迁移后删除源版本中的该对话），可选 `--mode copy` 保留源
+- 迁移单元完整：**session 行 + `session_usage` + `workspaces` 登记 + `projects/*.jsonl` 对话正文**。只搬数据库行是不够的，正文不在数据库里，漏了对话就是空的
+- 跨版本迁移自动把 `user_id` 改写为目标版本当前登录账号，否则目标版本里依然看不到
+- 冲突分级询问：
+  - 硬冲突（ID 相同）→ 覆盖 / 不操作
+  - 软冲突（标题相同、ID 不同，多为重复迁移）→ 覆盖 / 不覆盖 / 不操作
+  - 询问时展示差异对比（最后活动时间、消息数、对话大小、工具调用、token 用量、最后提问）并给出覆盖建议
+- 覆盖时始终以**源的 ID** 写入并删除目标那条旧记录，保证正文文件名与 ID 一致
+- 备份精确到单条，回滚不影响其他对话；`--dry-run` 可先预览
+- 安全：迁移前检测客户端是否运行，**未关闭则拒绝执行**（WAL 未落盘 + 内存缓存会覆盖写入）
+- 新增 `tests/`：`prepare_fixture.py` 从真实数据只读复制出临时 fixture，`run_tests.py` 提供 61 项端到端测试，全程在临时目录运行
+
+**修复：正文含 `tool-results/` 目录时备份直接崩溃**
+
+- 大工具输出会被外溢到 `projects/{slug}/{id}/tool-results/*.txt`（一个与会话同名的**目录**）。
+  备份阶段对目录调用 `shutil.copy2()` 在 Windows 上抛 `PermissionError: [Errno 13]`，
+  整个迁移中断。现在文件与目录统一走 `copy_path()` / `remove_path()`
+- 同一根因还波及迁移复制、move 删源、回滚还原、软冲突清理旧记录四处，一并修复
+- 对话大小统计改为递归累加，此前 `tool-results/` 被算成 0，显示的体积偏小
+- 列表里区分显示「N 个文件 + N 个目录（tool-results）」，不再让人误以为多出异常项
+
+**修复：同版本选 copy 时提示「无需迁移」却什么也没做**
+
+- `_migrate_intra` 原先只实现「改 `user_id`」一种语义，源对话已属于当前账号时无从可改就空转
+- 现在自动按**克隆**处理：生成新 session id，标题加「（副本）」，复制正文与任务数据
+- 克隆会改写正文中每条消息的 `"sessionId"`（否则副本内部仍指向原对话）、
+  并按新 id 重命名正文文件与 `tool-results/` 目录
+- 回滚按 `kind=session_clone` 单独处理，**只删副本、不动原对话**
+  （走通用回滚分支会按原 id 删行，把原始对话一起删掉）
+- 备份中途失败会自清理，不再残留没有 `meta.json` 的半成品目录
+
+**改进：原有 `scripts/migrate.py`**
+
+- 当前账号识别：国内版继续以平台 `storage.json` 的 `genie.userId` 为权威；国际版使用数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid`（跨平台路径统一，不依赖 `%APPDATA%` 探测）；两者都取不到时回落 DB 中 session 数最多的 `user_id`（与上游 #6 策略一致）
+- 回滚安全性：备份 `meta.json` 缺失导致 `target_uid` 为空时，跳过 Memory / Connectors 恢复。原先路径会退化成整个 `connectors/` 目录并被 `rmtree` **删光所有账号的连接器配置**
+- 回滚完整性：Connectors / Memory 的恢复不再要求目标当前必须存在，只要备份里有就恢复。原先迁移后清理过目录就恢复不了
+- Memory 迁移在 `memory/` 目录不存在时自动创建，不再报错
+
+#### v1.5.0 (2026-09-09)
+
+**国内版 / 国际版双版本支持**
+
+- **新增**：支持 WorkBuddy 国际版（数据目录 `~/.workbuddy-ai/`），通过 `--intl` 参数或交互式向导选择
+- **改进**：交互式向导新增版本选择步骤，展示两个版本的路径区别
+- **默认行为**：不加参数时自动探测数据目录（`~/.workbuddy-ai` 存在且非空判为国际版，否则国内版），`--intl` / `--dir` 可显式指定
 
 #### v1.4.0 (2026-08-06)
 
@@ -256,7 +433,19 @@ cd workbuddy-account-migrate
 python3 scripts/migrate.py
 ```
 
-Interactive wizard — just pick a number, no user_id knowledge required.
+Interactive wizard — pick your edition (domestic or international), then select accounts by number.
+
+**Other modes:**
+
+```bash
+python3 scripts/migrate.py --diagnose              # Diagnose only
+python3 scripts/migrate.py --source <USER_ID>      # Specify source account
+python3 scripts/migrate.py --intl                  # International edition (~/.workbuddy-ai)
+python3 scripts/migrate.py --intl --diagnose       # Diagnose international edition
+python3 scripts/migrate.py --rollback <TAG>        # Rollback to backup
+```
+
+> **Domestic vs International**: the only difference is the data directory — domestic uses `~/.workbuddy/`, international uses `~/.workbuddy-ai/`. Directory resolution order: `--dir` > `--intl` > auto-detect (`~/.workbuddy-ai` non-empty means international).
 
 ### What Gets Migrated
 
@@ -272,6 +461,7 @@ Skills, Automations, Settings are global (no user_id) — no migration needed.
 
 - 🧙 Interactive wizard (pick target & source accounts by number, no user_id needed)
 - 🖥️ Cross-platform: storage.json path auto-detected for macOS / Windows / Linux (v1.4)
+- 🌍 Domestic / International edition: interactive wizard prompts for edition, or use `--intl` for `~/.workbuddy-ai`
 - 🔒 Safe: append-only memory, deep-merge connectors, WAL checkpoint before & after
 - 🔍 Authoritative login detection: storage.json first, DB session-count as cross-check (v1.4)
 - ✅ Post-migration verification (source user_id must be zero)
@@ -279,11 +469,71 @@ Skills, Automations, Settings are global (no user_id) — no migration needed.
 
 ### Compatibility
 
-- ✅ WorkBuddy macOS (tested)
-- ✅ WorkBuddy Windows / Linux (paths adapted in v1.4, feedback welcome)
+- ✅ WorkBuddy Domestic edition — macOS (tested), Windows / Linux (paths adapted in v1.4)
+- ✅ WorkBuddy International edition — Windows (data dir `~/.workbuddy-ai/`, use `--intl`, v1.5, tested)
+- ⚠️ WorkBuddy International edition — macOS / Linux (theoretically supported, untested)
 - ❌ CodeBuddy CLI (not needed — it uses project-level isolation, not user-level)
 
+> **Domestic vs International**: domestic edition stores data in `~/.workbuddy/`, international in `~/.workbuddy-ai/`. The migration tool auto-detects the directory, or you can pin it with `--intl` / `--dir`.
+
+### Single-session cross-edition migration
+
+To move **one conversation** between editions (domestic ⇄ international), use the second script:
+
+```bash
+python3 scripts/migrate_session.py                 # interactive wizard
+python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
+```
+
+- **Close both WorkBuddy clients first** — the script refuses to run otherwise (WAL not flushed + in-memory cache would overwrite your changes).
+- Default is `move` (deletes the source after migrating); use `--mode copy` to keep it.
+- If the target already has the conversation, you get a diff (last activity / message count / size / last prompt) and a choice: overwrite / skip / cancel.
+- Migrates the session row, usage stats, workspace entry **and** the `projects/*.jsonl` transcript — without the transcript the conversation opens empty.
+
 ### Changelog
+
+#### v1.6.0 (2026-09-10)
+
+**Single-session cross-edition migration (domestic ⇄ international)**
+
+- **New**: `scripts/migrate_session.py` — migrate one conversation between editions
+- **New**: carries `session_usage`, `workspaces` and the `projects/*.jsonl` transcript along (DB row alone = empty conversation)
+- **New**: conflict prompts — hard conflict (same ID) offers 2 choices, soft conflict (same title, different ID) offers 3, both with a side-by-side diff and an overwrite recommendation
+- **New**: `move` by default, `copy` optional; per-session backup, rollback touches nothing else
+- **Improved**: current account now resolved from `storage/skeleton/account-snapshot.json` inside the data dir (edition-aware, cross-platform)
+- **Safety**: refuses to run while a WorkBuddy client is running
+- **Tests**: new `tests/` with fixture builder + 61 end-to-end checks, all in a temp dir
+
+**Fixed: backup crashed when the transcript included a `tool-results/` directory**
+
+- Large tool outputs spill to `projects/{slug}/{id}/tool-results/*.txt` — a **directory** named after the session.
+  `shutil.copy2()` on it raised `PermissionError: [Errno 13]` on Windows and aborted the whole migration.
+  Files and directories now go through a shared `copy_path()` / `remove_path()`.
+- Same root cause affected migration copy, `move` source deletion, rollback restore and soft-conflict cleanup — all fixed.
+- Size reporting now recurses into directories (previously `tool-results/` counted as 0).
+
+**Fixed: same-edition `copy` said "nothing to migrate" and did nothing**
+
+- `_migrate_intra` only implemented the "reassign `user_id`" case; when the session already belonged to the current account there was nothing to reassign, so it bailed out.
+- It now clones: new session id, title suffixed with 「（副本）」, transcript and task data copied.
+- The clone rewrites every in-transcript `"sessionId"` and renames the transcript / `tool-results/` to the new id.
+- Rollback handles `kind=session_clone` separately — it removes only the copy, never the original.
+- A failed backup now cleans itself up instead of leaving a half-written directory.
+
+**Changes to the existing `migrate.py`:**
+
+- Current account detection now uses `storage/skeleton/account-snapshot.json`
+- Rollback safety: if `meta.json` is missing and `target_uid` is empty, Memory/Connectors restore is skipped — the path would otherwise degrade to the whole `connectors/` dir and `rmtree` **every account's config**
+- Rollback completeness: Connectors/Memory are restored whenever the backup has them, even if the target no longer exists
+- Memory migration creates `memory/` when missing instead of crashing
+
+#### v1.5.0 (2026-09-09)
+
+**Domestic / International edition support**
+
+- **New**: support for WorkBuddy International edition (data directory `~/.workbuddy-ai/`) via `--intl` flag or interactive wizard selection
+- **Improved**: interactive wizard now prompts for edition choice with path details
+- **Default**: without any flag, the data directory is auto-detected (non-empty `~/.workbuddy-ai` wins); `--intl` / `--dir` pin it explicitly
 
 #### v1.4.0 (2026-08-06)
 

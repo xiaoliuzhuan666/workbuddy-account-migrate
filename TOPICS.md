@@ -29,6 +29,8 @@ tencent-cloud
 data-migration
 backup-restore
 conversation-history
+cross-edition
+single-session
 mcp
 ai-assistant
 macos

@@ -30,17 +30,50 @@
 ├── mcp.json                      # 全局 MCP 配置，无隔离 ✅
 ├── models.json                   # 自定义模型，无隔离 ✅
 │
-├── projects/                     # 对话日志
+├── projects/                     # 对话正文（不在数据库里！）
 │   └── {workspace_path}/         # 按工作空间路径，不按账号 ✅
+│       ├── {session_id}.jsonl            # 对话正文
+│       ├── {session_id}.meta.json        # 元信息
+│       ├── {session_id}.file-rollback.ndjson
+│       └── {session_id}/                 # ⚠️ 目录！大工具输出外溢处
+│           └── tool-results/*.txt
+│
+│   # 注意：glob("*/{session_id}*") 会同时命中上面的【文件】和这个【目录】，
+│   #      对目录做 shutil.copy2()/unlink() 在 Windows 上会抛 PermissionError / IsADirectoryError
 │
 ├── tasks/                        # 任务列表
 │   └── {session_id}/             # 按 session 归属，新版 UI 不读取 ← 恢复目标
 │       └── {id}.json             # 任务 JSON（subject/description/status等）
 │
+├── storage/skeleton/
+│   └── account-snapshot.json     # 当前登录账号（primary.uid）← 最可靠的 uid 来源
+│
 └── logs/                         # 日志，全局共享 ✅
 ```
 
+### projects 目录名（slug）推导规则
+
+```
+C:\Users\alice\WorkBuddy\2026-09-10-14-49-02
+  → c-Users-alice-WorkBuddy-2026-09-10-14-49-02
+```
+
+盘符转小写、去掉 `:`、`\` 和 `/` 转 `-`，空格保留。
+跨版本迁移时优先用 `glob("*/{session_id}*")` 反查，不要硬算。
+
 ### 当前登录 user_id 获取方式
+
+**首选**（在数据目录内，天然区分国内/国际版，跨平台统一）：
+
+```bash
+python3 -c "
+import json,os
+p=os.path.expanduser('~/.workbuddy/storage/skeleton/account-snapshot.json')
+print(json.load(open(p)).get('primary',{}).get('uid',''))
+"
+```
+
+**兜底**（旧方式，部分机器上 `%APPDATA%` 探测不到）：
 
 ```bash
 cat ~/Library/Application\ Support/WorkBuddy/User/globalStorage/storage.json | \
@@ -56,6 +89,8 @@ cat ~/Library/Application\ Support/WorkBuddy/User/globalStorage/storage.json | \
 | connectors/mcp.json | 子目录 | JSON 深度合并 | 🟡 中（配置） |
 | connectors/states.json | 子目录 | JSON 深度合并 | 🟢 低 |
 | **tasks** | **按 session** | **TaskCreate 重建 / 文件复制** | **🟡 中（新版 UI 不读文件）** |
+| **projects/*.jsonl** | **按 session（非数据库）** | **跨版本必须复制文件** | **🔴 高（漏了对话就是空的）** |
+| **projects/{sid}/tool-results/** | **按 session（目录）** | **必须整目录复制** | **🔴 高（备份阶段若按文件处理会崩溃）** |
 | skills | 无 | 不需要迁移 | - |
 | automations | 无 | 不需要迁移 | - |
 | settings/mcp/models | 无 | 不需要迁移 | - |
