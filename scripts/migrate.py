@@ -165,77 +165,139 @@ ACCOUNT_SNAPSHOT = WORKBUDDY_DIR / "storage" / "skeleton" / "account-snapshot.js
 BACKUP_DIR = WORKBUDDY_DIR / "migrate_backups"
 
 
-def get_current_user_id():
-    """获取当前登录的 user_id
+def get_client_login_uid():
+    """客户端真实登录态：{数据目录}/storage/skeleton/account-snapshot.json → primary.uid
 
-    优先级策略：
-    1. 从 storage.json 的 genie.userId 读取（国内版，登录态权威来源）
-    2. 国际版从 account-snapshot.json 的 primary.uid 读取（登录态权威来源）
-    3. 从 workbuddy.db 中 session 数量最多的 user_id 推断（辅助验证）
-    4. 如果上述来源不一致，优先使用登录态权威来源，并发出警告
-
-    ⚠️  注意：不能用"最新 session"来判断当前账号！
-    因为旧账号在切换前的最后一条 session 可能比当前账号的 session 更新，
-    导致误把旧账号当成当前账号。
+    这是**左侧会话列表按哪个 uid 过滤**的直接来源——面板跟着它走。
+    国内版历史上只认平台 storage.json，而两者可能长期不一致
+    （2026-09-22 实例：storage.json 记的是扩展侧账号，客户端实际登录的却是另一个账号），
+    导致迁移每次都并到面板看不到的账号，重启后面板依旧空白。
     """
-    db_uid = ""
-    login_uid = ""
-
-    # 方法1a：从 storage.json 读取（国内版，登录态权威来源）
-    # 注意：_get_storage_json_path() 可能返回 None（平台路径不存在）
-    if STORAGE_JSON is not None:
-        try:
-            with open(STORAGE_JSON, encoding="utf-8") as f:
-                data = json.load(f)
-            login_uid = data.get("genie.userId", "")
-        except Exception:
-            pass
-
-    # 方法1b：国际版 account-snapshot.json（登录态权威来源）
-    if not login_uid and ACCOUNT_SNAPSHOT.exists():
+    if ACCOUNT_SNAPSHOT.exists():
         try:
             with open(ACCOUNT_SNAPSHOT, encoding="utf-8") as f:
                 data = json.load(f)
-            primary = data.get("primary", {})
-            login_uid = primary.get("uid", "")
+            primary = data.get("primary") or {}
+            return primary.get("uid", "") or ""
         except Exception:
             pass
+    return ""
 
-    # 方法2：从 DB 推断——用 session 数量最多的 user_id（而非最新 session）
-    # 避免被偶发的旧账号 session 欺骗
-    if DB_PATH.exists():
-        conn = None
+
+def get_client_login_nickname():
+    """account-snapshot.json 里的昵称，仅用于把 uid 打印成人能看懂的样子"""
+    if ACCOUNT_SNAPSHOT.exists():
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT user_id, COUNT(*) as cnt FROM sessions "
-                "WHERE user_id IS NOT NULL GROUP BY user_id ORDER BY cnt DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                db_uid = row[0]
+            with open(ACCOUNT_SNAPSHOT, encoding="utf-8") as f:
+                data = json.load(f)
+            return ((data.get("primary") or {}).get("nickname") or "")
         except Exception:
             pass
-        finally:
-            if conn is not None:
-                conn.close()
+    return ""
 
-    # 交叉验证
-    if login_uid and db_uid and login_uid != db_uid:
-        print(f"⚠️  检测到 user_id 不一致！")
-        print(f"   登录态 (storage.json / account-snapshot.json): {login_uid}")
-        print(f"   DB session 数最多的 user_id: {db_uid}")
-        print(f"   → 优先使用登录态 user_id（登录态权威）: {login_uid}")
+
+def get_storage_json_uid():
+    """扩展侧记录的账号：平台 storage.json → genie.userId
+
+    可能滞后于客户端登录态（账号切换后不一定同步更新），因此只作为第二优先级。
+    """
+    if STORAGE_JSON is None:
+        return ""
+    try:
+        with open(STORAGE_JSON, encoding="utf-8") as f:
+            return json.load(f).get("genie.userId", "") or ""
+    except Exception:
+        return ""
+
+
+def get_panel_uid_hint():
+    """旁证：daemon.log 里最近一次 listSessions 用的 uid —— 面板实际过滤用的就是它
+
+    只用于打印，不参与目标账号判定（日志解析不该成为决策依据）。
+    """
+    log_file = WORKBUDDY_DIR / "logs" / "daemon.log"
+    if not log_file.exists():
+        return ""
+    try:
+        with open(log_file, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 400_000))
+            tail = f.read().decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    hit = ""
+    for line in tail.splitlines():
+        if "listSessions" in line:
+            # daemon.log 里嵌套 JSON 的引号是转义的（\"userId\"），必须容忍反斜杠
+            m = re.search(r'\\?"userId\\?"\s*:\s*\\?"([0-9a-fA-F-]{36})', line)
+            if m:
+                hit = m.group(1)
+    return hit
+
+
+def get_db_top_uid():
+    """DB 中 session 数最多的 user_id（辅助验证，不能当权威）"""
+    if not DB_PATH.exists():
+        return ""
+    conn = None
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, COUNT(*) as cnt FROM sessions "
+            "WHERE user_id IS NOT NULL GROUP BY user_id ORDER BY cnt DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        return row[0] if row and row[0] else ""
+    except Exception:
+        return ""
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_current_user_id(verbose=True):
+    """获取当前登录的 user_id
+
+    优先级（v1.6.3 调整）：
+    1. **account-snapshot.json → primary.uid**（客户端真实登录态，左侧面板按它过滤）
+    2. storage.json → genie.userId（扩展侧记录，账号切换后可能滞后）
+    3. workbuddy.db 中 session 数最多的 user_id（辅助兜底）
+
+    verbose=False 时不重复打印「两个来源不一致」（diagnose 已经单独排版展示过）。
+
+    ⚠️  不要再用「storage.json 优先」（v1.4~v1.6.2 的旧策略）：
+    国内版实测两者会长期不一致，迁移会并到面板看不到的账号，重启后面板依旧空白。
+    ⚠️  也不要用「最新 session」：旧账号切换前的最后一条 session 可能更新。
+    """
+    client_uid = get_client_login_uid()
+    storage_uid = get_storage_json_uid()
+    db_uid = get_db_top_uid()
+
+    if verbose and client_uid and storage_uid and client_uid != storage_uid:
+        print("⚠️  登录态有两个来源且不一致！")
+        print(f"   客户端登录态 (account-snapshot.json，面板按它过滤): {client_uid}"
+              f"{' (' + get_client_login_nickname() + ')' if get_client_login_nickname() else ''}")
+        print(f"   扩展侧记录   (storage.json  genie.userId)         : {storage_uid}")
+        hint = get_panel_uid_hint()
+        if hint and hint != client_uid:
+            print(f"   daemon 最近 listSessions 的 uid                    : {hint}")
+            print("   （与客户端登录态也不一致，说明期间发生过账号切换，重启后以登录态为准）")
+        print(f"   → 本次以客户端登录态为准: {client_uid}")
+        print(f"   → 迁移请显式指定 --target {client_uid}，否则数据会并到面板看不到的账号")
         print()
 
-    if login_uid:
-        return login_uid
-
+    if client_uid:
+        return client_uid
+    if storage_uid:
+        print(f"⚠️  未读到客户端登录态，回落到 storage.json 记录的账号: {storage_uid}")
+        return storage_uid
     if db_uid:
+        print(f"⚠️  未读到任何登录态，回落到 DB 中 session 最多的账号: {db_uid}")
         return db_uid
 
-    print("❌ 无法获取当前 user_id（storage.json / account-snapshot.json 和 DB 均无数据）")
+    print("❌ 无法获取当前 user_id（account-snapshot.json / storage.json 和 DB 均无数据）")
     return ""
 
 
@@ -329,16 +391,32 @@ def get_connector_info():
 
 def diagnose():
     """诊断模式：展示所有账号数据分布"""
-    current_uid = get_current_user_id()
+    client_uid = get_client_login_uid()
+    storage_uid = get_storage_json_uid()
+    panel_uid = get_panel_uid_hint()
+
+    print("=" * 70)
+    print("WorkBuddy 账号数据诊断")
+    print("=" * 70)
+
+    # 登录态可能有两个来源，先把它们摆出来 —— 这是「迁移后左侧面板仍空白」的头号原因
+    print("\n登录态来源:")
+    nick = get_client_login_nickname()
+    print(f"  account-snapshot.json 客户端登录态（左侧面板按它过滤）: {client_uid or '-'}"
+          f"{('  「' + nick + '」') if nick else ''}")
+    print(f"  storage.json genie.userId 扩展侧记录（账号切换后可能滞后）: {storage_uid or '-'}")
+    print(f"  daemon 最近 listSessions uid（面板最近一次刷新用的）    : {panel_uid or '-'}")
+    if client_uid and storage_uid and client_uid != storage_uid:
+        print("\n  ⚠️  前两者不一致 —— 这是「迁移完左侧列表仍空白」的典型原因。")
+        print("     迁移时务必显式加 --target，并指向【客户端登录态】那个 uid。")
+
+    current_uid = get_current_user_id(verbose=False)
     all_uids = get_all_user_ids()
     session_counts = get_session_counts()
     memory_sizes = get_memory_sizes()
     connector_info = get_connector_info()
 
-    print("=" * 70)
-    print("WorkBuddy 账号数据诊断")
-    print("=" * 70)
-    print(f"\n当前登录: {current_uid}\n")
+    print(f"\n当前登录（本次判定）: {current_uid}\n")
 
     print(f"{'user_id':<40} {'Sessions':>8} {'Memory':>10} {'Connectors':>12} {'当前':>4}")
     print("-" * 80)
@@ -359,15 +437,25 @@ def diagnose():
         print("⚠️  只发现一个账号，无需迁移。")
         return
 
-    # 建议迁移方向
+    # 建议迁移方向：按数据量排序，只对真正有数据的账号给命令（0 session + 0KB 的噪音不列）
     other_uids = [u for u in all_uids if u != current_uid]
+    other_uids.sort(
+        key=lambda u: (session_counts.get(u, 0), memory_sizes.get(u, 0)),
+        reverse=True,
+    )
     if other_uids:
-        print("💡 迁移建议:")
+        print("💡 迁移建议（按数据量排序）:")
         for uid in other_uids:
             sc = session_counts.get(uid, 0)
             ms = memory_sizes.get(uid, 0)
             print(f"   {uid[:20]}... → 当前账号 ({sc} sessions, {ms / 1024:.1f}KB memory)")
-        print(f"\n   执行命令: python3 migrate.py --source {other_uids[0]}")
+
+        targets = [u for u in other_uids
+                   if session_counts.get(u, 0) > 0 or memory_sizes.get(u, 0) > 0]
+        if targets:
+            print(f"\n   执行命令: python3 migrate.py --source {targets[0]} --target {current_uid}")
+            print("   （--target 必须写成上面【客户端登录态】的 uid，否则数据会并到面板看不到的账号）")
+            print("   （源账号 memory 文件按设计保留，重复执行是幂等的，不会重复写入）")
 
 
 def _backup_db(src: Path, dst: Path) -> bool:
@@ -395,8 +483,12 @@ def _backup_db(src: Path, dst: Path) -> bool:
             dst_conn.close()
 
 
-def create_backup(target_uid, timestamp):
-    """创建备份"""
+def create_backup(target_uid, timestamp, source_uid=""):
+    """创建备份
+
+    meta.json 除 target_uid（rollback 依赖它）外，额外记录 source_uid 与当时的
+    两个登录态来源、各账号数据量 —— 事后复盘「为什么并错了方向」时全靠它。
+    """
     # 先判断存在性再 mkdir：WorkBuddy 内置 Python shim 会劫持 Path.mkdir，
     # 即使 exist_ok=True，目录已存在时也会抛 EEXIST PermissionError
     if not BACKUP_DIR.exists():
@@ -432,10 +524,16 @@ def create_backup(target_uid, timestamp):
         print(f"  ✅ 已备份 Connectors → {backup_path / target_uid}/")
 
     # 写入备份元数据
+    # ⚠️ target_uid 是 --rollback 的依赖字段，不能改名/删掉
     meta = {
         "timestamp": timestamp,
         "target_uid": target_uid,
+        "source_uid": source_uid or "",
         "created_at": datetime.now().isoformat(),
+        # 事后复盘用：当时客户端登录态 vs 扩展侧记录（不一致是踩坑的信号）
+        "client_login_uid": get_client_login_uid(),
+        "storage_json_uid": get_storage_json_uid(),
+        "session_counts": get_session_counts(),
     }
     with open(backup_path / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -502,6 +600,79 @@ def migrate_sessions(source_uid, target_uid):
 
     print(f"  ✅ 迁移 {migrated} 个 session（{source_uid[:12]}... → {target_uid[:12]}...）")
     return migrated
+
+
+def reset_cloud_mapping(source_uid, backup_dir=None):
+    """清掉源账号在 `edge-sync-mapping*.db` 里的云端通道映射
+
+    为什么必须做：左侧列表按 `sessions.user_id` 过滤，但**云端同步**是按 edge-sync
+    的 `msg_channel` 记账的。会话的 user_id 改成新账号后，映射表里仍写着
+    `convmsg:<旧账号>`，EdgeSync 会判定"这些对话早就同步过了"，于是**不重新上传**。
+    后果：本机看得到，换台设备登录新账号却看不到这些历史（云端归属还挂在旧账号）。
+
+    清掉这些映射行后，EdgeSync 下次启动会按新账号的通道重新上传。
+    只删映射（不碰对话内容），删除前整库备份，失败也只告警不中断。
+
+    返回 (删除行数, 涉及的库数)。
+    """
+    if not source_uid:
+        return 0, 0
+    channel = f"convmsg:{source_uid}"
+    total_deleted = 0
+    touched = 0
+
+    for db_file in sorted(WORKBUDDY_DIR.glob("edge-sync-mapping*.db")):
+        if not db_file.is_file() or db_file.name.endswith(("-shm", "-wal")):
+            continue
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_file))
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='edge_sync_mapping'"
+            )
+            if not cur.fetchone():
+                conn.close()
+                continue
+            cur.execute(
+                "SELECT COUNT(*) FROM edge_sync_mapping WHERE msg_channel = ?", (channel,)
+            )
+            n = cur.fetchone()[0]
+            if n == 0:
+                conn.close()
+                continue
+
+            # 删除前整库备份（含 WAL/SHM）
+            if backup_dir is not None:
+                if not backup_dir.exists():
+                    backup_dir.mkdir(exist_ok=True)
+                dst_dir = backup_dir / "edge-sync"
+                if not dst_dir.exists():
+                    dst_dir.mkdir(exist_ok=True)
+                for suffix in ("", "-wal", "-shm"):
+                    src = Path(str(db_file) + suffix)
+                    if src.exists():
+                        shutil.copy2(str(src), str(dst_dir / src.name))
+
+            cur.execute("DELETE FROM edge_sync_mapping WHERE msg_channel = ?", (channel,))
+            deleted = cur.rowcount
+            conn.commit()
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+            total_deleted += deleted
+            touched += 1
+            print(f"  🧹 {db_file.name}: 清掉 {deleted} 条指向旧账号云通道的映射")
+        except sqlite3.Error as e:
+            print(f"  ⚠️  {db_file.name} 处理失败（不影响本地数据，可忽略）：{e}")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if total_deleted:
+        print("  ℹ️  下次启动客户端时，EdgeSync 会把这些对话重新上传到新账号的云端通道")
+    return total_deleted, touched
 
 
 RAW_JSON_RE = re.compile(r"<!--\s*RAW_JSON_START(.*?)RAW_JSON_END\s*-->", re.DOTALL)
@@ -667,11 +838,13 @@ def migrate_connectors(source_uid, target_uid):
             print(f"  ✅ 复制 {fname}（目标不存在）")
 
 
-def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=False):
+def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=False,
+            reset_mapping=True):
     """执行完整迁移流程
 
-    target_uid: 目标账号 ID。如果为 None，则自动从登录态（storage.json / account-snapshot.json）推断。
+    target_uid: 目标账号 ID。如果为 None，则自动从登录态（account-snapshot.json / storage.json）推断。
     target_is_manual: 目标账号是否由用户手动指定（--target 或交互向导），用于打印区分。
+    reset_mapping: 是否清理源账号的 edge-sync 云端通道映射（默认清理，见 reset_cloud_mapping）
     """
     if target_uid is None:
         target_uid = get_current_user_id()
@@ -692,7 +865,23 @@ def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=Fa
     print(f"\n  源账号:   {source_uid}")
     target_label = "手动指定" if target_is_manual else "当前登录"
     print(f"  目标账号: {target_uid} ({target_label})")
+
+    client_uid = get_client_login_uid()
+    if client_uid:
+        nick = get_client_login_nickname()
+        print(f"  客户端登录态: {client_uid}{('  「' + nick + '」') if nick else ''}")
     print()
+
+    # 目标账号 ≠ 客户端登录态的 uid → 迁移会「成功」但面板看不到（今天踩的坑）
+    if client_uid and client_uid != target_uid:
+        print("⚠️  目标账号不是客户端当前登录的账号！")
+        print(f"   左侧会话列表按客户端登录态（{client_uid[:8]}…）过滤，")
+        print("   迁完重启后大概率仍然看不到数据。")
+        if target_is_manual:
+            print("   你已手动指定 --target，确认这是有意为之再继续。")
+        else:
+            print(f"   建议改用: --target {client_uid}")
+        print()
 
     # Phase 1: 诊断
     print("📊 Phase 1: 诊断数据分布...")
@@ -717,7 +906,7 @@ def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=Fa
 
     # Phase 2: 备份
     print("\n📦 Phase 2: 创建备份...")
-    backup_tag = create_backup(target_uid, timestamp)
+    backup_tag = create_backup(target_uid, timestamp, source_uid=source_uid)
 
     # Phase 3: 迁移
     print("\n🔄 Phase 3: 执行迁移...")
@@ -731,18 +920,40 @@ def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=Fa
     print("\n  [Connector 迁移]")
     migrate_connectors(source_uid, target_uid)
 
+    print("\n  [云端通道映射（edge-sync）]")
+    if reset_mapping:
+        reset_cloud_mapping(source_uid, backup_dir=BACKUP_DIR / backup_tag)
+    else:
+        print("  ⏭️  已按 --keep-cloud-mapping 跳过")
+        print("     ⚠️  不清理的话，这些对话仍挂在旧账号的云端通道下，")
+        print("        换台设备登录新账号时看不到它们（本机不受影响）")
+
     # Phase 4: 验证
     print("\n✅ Phase 4: 验证...")
     new_session_counts = get_session_counts()
     new_target_sessions = new_session_counts.get(target_uid, 0)
     print(f"  当前账号 session 数: {session_counts.get(target_uid, 0)} → {new_target_sessions}")
 
+    # Phase 4.5: 面板一致性检查 —— 数据迁对了但面板看不到，是最常见的"看起来没成功"
+    client_uid = get_client_login_uid()
+    if client_uid and client_uid != target_uid:
+        print()
+        print("⚠️  迁移已写入，但目标账号 ≠ 客户端当前登录账号：")
+        print(f"   目标账号     : {target_uid}")
+        print(f"   客户端登录态 : {client_uid}"
+              f"{('  「' + get_client_login_nickname() + '」') if get_client_login_nickname() else ''}")
+        print("   左侧会话列表按客户端登录态过滤，重启后可能仍然看不到数据。二选一：")
+        print(f"     ① 在客户端切到/登录 {target_uid[:8]}… 再看")
+        print(f"     ② 回滚后重跑并加 --target {client_uid}")
+        print(f"       回滚: python3 migrate.py --rollback {backup_tag} --yes")
+
     # Phase 5: 收尾
     print("\n" + "=" * 70)
     print("迁移完成！")
     print("=" * 70)
     print(f"\n  📦 备份标签: {backup_tag}")
-    print(f"  🔄 已迁移: {migrated_sessions} sessions + memory + connectors")
+    print(f"  🔄 已迁移: {migrated_sessions} sessions + memory + connectors"
+          f"{' + 云端通道映射已重置' if reset_mapping else ''}")
     print(f"\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
     print(f"  📁 备份位置: {BACKUP_DIR / backup_tag}")
     print(f"  🔙 回滚命令: python3 migrate.py --rollback {backup_tag}")
@@ -812,10 +1023,24 @@ def rollback(backup_tag, skip_confirm=False):
         else:
             print("  ⏭️  备份中没有 Connector 数据，跳过")
 
+        # 恢复 edge-sync 云端通道映射（迁移时清过，回滚要还原，否则映射永久丢失，
+        # 客户端会把所有对话当"未同步"重新上传一遍）
+        es_backup = backup_path / "edge-sync"
+        if es_backup.exists():
+            restored = 0
+            for f in sorted(es_backup.iterdir()):
+                if f.is_file():
+                    shutil.copy2(str(f), str(WORKBUDDY_DIR / f.name))
+                    restored += 1
+            if restored:
+                print(f"  ✅ 已恢复 edge-sync 映射（{restored} 个文件）")
+        else:
+            print("  ⏭️  备份中没有 edge-sync 映射，跳过")
+
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
 
 
-def interactive_migrate(skip_edition_prompt=False):
+def interactive_migrate(skip_edition_prompt=False, keep_cloud_mapping=False):
     """交互式迁移向导：列出所有账号，用户分别选择源和目标"""
 
     # 版本选择：默认沿用自动探测结果，--intl 时跳过询问
@@ -870,14 +1095,22 @@ def interactive_migrate(skip_edition_prompt=False):
     print("=" * 70)
     print("WorkBuddy 账号迁移向导")
     print("=" * 70)
+    client_uid = get_client_login_uid()
     print("\n请选择迁移方向：先选【目标账号】（接收数据），再选【源账号】（被迁移）\n")
     print(f"  {'序号':<4} {'user_id':<40} {'Sessions':>8} {'Memory':>10} {'Connectors':>12}")
     print("  " + "-" * 72)
     for i, uid in enumerate(all_uids, 1):
         sc, ms_str, conn_str = format_uid(uid)
-        print(f"  {i:<4} {uid:<40} {sc:>8} {ms_str:>10} {conn_str:>12}")
+        mark = "  ← 客户端登录态（面板按它过滤）" if uid == client_uid else ""
+        print(f"  {i:<4} {uid:<40} {sc:>8} {ms_str:>10} {conn_str:>12}{mark}")
 
-    print("\n  ⚠️  如果下方「当前登录」显示有误，请忽略，直接按实际登录状态选择。\n")
+    if client_uid:
+        nick = get_client_login_nickname()
+        print(f"\n  ℹ️  客户端登录态 = {client_uid}{('  「' + nick + '」') if nick else ''}")
+        print("     左侧会话列表按它过滤，**目标账号通常就选带这个标记的那个**；")
+        print("     选成别的 uid，迁完重启后面板依旧看不到数据。\n")
+    else:
+        print("\n  ⚠️  读不到客户端登录态（account-snapshot.json 不存在），请按实际登录状态选择。\n")
 
     # 选目标账号
     while True:
@@ -907,7 +1140,8 @@ def interactive_migrate(skip_edition_prompt=False):
     print("  " + "-" * 72)
     for i, uid in enumerate(other_uids, 1):
         sc, ms_str, conn_str = format_uid(uid)
-        print(f"  {i:<4} {uid:<40} {sc:>8} {ms_str:>10} {conn_str:>12}")
+        mark = "  ← 客户端登录态" if uid == client_uid else ""
+        print(f"  {i:<4} {uid:<40} {sc:>8} {ms_str:>10} {conn_str:>12}{mark}")
 
     while True:
         try:
@@ -930,7 +1164,8 @@ def interactive_migrate(skip_edition_prompt=False):
     print(f"\n  源账号:   {source_uid[:20]}... ({session_counts.get(source_uid, 0)} sessions)")
     print(f"  目标账号: {target_uid[:20]}... ({session_counts.get(target_uid, 0)} sessions)")
     print()
-    migrate(source_uid, target_uid=target_uid, target_is_manual=True)
+    migrate(source_uid, target_uid=target_uid, target_is_manual=True,
+            reset_mapping=not keep_cloud_mapping)
 
 
 def get_task_stats():
@@ -1259,6 +1494,8 @@ def main():
     parser.add_argument("--source", "-s", type=str, help="源账号 user_id（要迁移出的账号）")
     parser.add_argument("--target", "-t", type=str, help="目标账号 user_id（接收数据的账号，默认从登录态 storage.json / account-snapshot.json 自动推断）")
     parser.add_argument("--yes", "-y", action="store_true", help="跳过确认直接迁移/回滚")
+    parser.add_argument("--keep-cloud-mapping", action="store_true",
+                        help="迁移后不重置 edge-sync 云端通道映射（默认重置：让对话按新账号的通道重新上传）")
     parser.add_argument("--restart", action="store_true", help="完成后自动重启 WorkBuddy 客户端（macOS），让会话列表立即刷新，无需手动重启")
     parser.add_argument("--rollback", "-r", type=str, help="回滚到指定备份标签")
     parser.add_argument("--restore-tasks", action="store_true", help="恢复历史任务到当前 session")
@@ -1294,12 +1531,15 @@ def main():
         else:
             restore_tasks(target_session_id=args.session, skip_confirm=args.yes)
     elif args.source:
-        migrate(args.source, target_uid=args.target, skip_confirm=args.yes, target_is_manual=args.target is not None)
+        migrate(args.source, target_uid=args.target, skip_confirm=args.yes,
+                target_is_manual=args.target is not None,
+                reset_mapping=not args.keep_cloud_mapping)
         if args.restart:
             restart_client()
     else:
         # 无参数时进入交互式向导
-        interactive_migrate(skip_edition_prompt=args.intl)
+        interactive_migrate(skip_edition_prompt=args.intl,
+                            keep_cloud_mapping=args.keep_cloud_mapping)
 
 
 if __name__ == "__main__":

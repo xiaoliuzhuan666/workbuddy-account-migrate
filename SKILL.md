@@ -18,13 +18,23 @@ WorkBuddy 切换账号后，数据通过 `user_id` 隔离，旧账号的 Session
 
 ## 快速使用
 
+**获取代码**（`git clone` 在某些受限 shell / 沙箱环境里会因为目标目录被预创建而失败，用 tarball 更稳）：
+
+```bash
+git clone https://github.com/xiaoliuzhuan666/workbuddy-account-migrate.git
+# 克隆失败时改用：
+mkdir -p workbuddy-account-migrate && cd workbuddy-account-migrate
+curl -sSL https://codeload.github.com/xiaoliuzhuan666/workbuddy-account-migrate/tar.gz/refs/heads/main \
+  | tar xz --strip-components=1
+```
+
 **整账号迁移（最简方式，交互式向导，用户无需知道 user_id）：**
 
 ```bash
 python3 scripts/migrate.py
 ```
 
-运行后自动诊断、列出可选账号、用户输入序号即可。
+运行后自动诊断、列出可选账号、用户输入序号即可。**目标账号请选带「← 客户端登录态」标记的那个** —— 选错 uid 迁完重启面板还是空的。
 
 **单对话跨版本迁移：**
 
@@ -45,6 +55,8 @@ python3 scripts/migrate.py --intl                  # 国际版（数据目录 ~/
 python3 scripts/migrate.py --dir ~/.workbuddy-ai   # 显式指定数据目录（优先级最高）
 python3 scripts/migrate.py --rollback <TAG>        # 回滚到指定备份
 python3 scripts/migrate.py --source <UID> --yes --restart  # 迁移后自动重启客户端（macOS，会话列表立即刷新）
+python3 scripts/migrate.py --source <UID> --target <UID>   # 显式指定目标（登录态两来源不一致时必加）
+python3 scripts/migrate.py --source <UID> --keep-cloud-mapping  # 不重置 edge-sync 云端通道映射（默认会重置）
 
 python3 scripts/migrate_session.py --mode copy     # 迁移后保留源（默认 move 会删源）
 python3 scripts/migrate_session.py --dry-run       # 只预览不写盘
@@ -336,6 +348,72 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 | **WAL 未 checkpoint 导致迁移丢失** | **即使 UPDATE sessions 成功 + commit，如果 WAL 日志没有 checkpoint，客户端重启后可能读不到修改，数据恢复为旧状态** | **v1.3 修复：迁移前后各做一次 PRAGMA wal_checkpoint(TRUNCATE)，并验证源 user_id 归零** |
 | **AI 手动迁移时的常见错误** | **AI 在对话中直接写 SQL 迁移时，可能：(1) 从 storage.json 读到错误的 target_uid (2) 忘记 WAL checkpoint (3) 不验证结果** | **必须：(1) 从当前对话 session 的 user_id 确定目标 (2) UPDATE 后做 WAL checkpoint (3) 验证源 user_id 归零** |
 | **WorkBuddy 会话内运行脚本被沙箱 shim 劫持** | **在 WorkBuddy 会话的 Bash 里跑 migrate.py 时，PYTHONPATH 指向沙箱 shim（sitecustomize.py），拦截 Path.mkdir；目录已存在时 mkdir(exist_ok=True) 抛 PermissionError EEXIST。托管 Python 和系统 Python 都会被劫持** | **v1.6.2 起脚本启动时自动剥离 PYTHONPATH 并 re-exec，直接 `python3 scripts/migrate.py ...` 即可；旧版本用 `env -u PYTHONPATH python3 scripts/migrate.py ...`（2026-09-20 实战踩坑）** |
+| **登录态有两个来源，可能长期不一致** | **国内版 `storage.json` 的 `genie.userId`（扩展侧记录）与 `storage/skeleton/account-snapshot.json` 的 `primary.uid`（客户端真实登录态）可能是两个不同的 uid；左侧会话列表按后者过滤** | **v1.6.3 起目标账号改为 account-snapshot.json 优先，diagnose 并列展示三个来源；迁移务必显式 `--target <客户端登录态 uid>`（2026-09-22 实例：反复迁到 storage.json 里的旧 uid，重启后面板始终空白，来回折腾 6 次）** |
+| **迁移"成功"但面板仍空白** | **数据迁到了非登录态的那个 uid；面板按登录态过滤，等于没迁** | **migrate() 新增 Phase 4.5 一致性检查：target ≠ 客户端登录态时明确给出两条补救路径（切账号 / 回滚后加 --target 重跑）** |
+| **daemon.log 里 uid 搜不到** | **嵌套 JSON 的引号是转义的（`\"userId\":\"...\"`），用 `"userId"` 直接搜匹配不到** | **正则写成 `\\?"userId\\?"\s*:\s*\\?"(...)`；仅作旁证展示，不参与判定** |
+
+## 登录态：先确认你到底登在哪个账号（v1.6.3 必读）
+
+**迁移前唯一要确认的事**：目标账号必须 = **客户端登录态**那个 uid，不是别的。
+
+| 来源 | 路径 | 含义 | 可靠度 |
+|:---|:---|:---|:---|
+| **客户端登录态** | `{数据目录}/storage/skeleton/account-snapshot.json` → `primary.uid` | 对话客户端真实登录的账号；**左侧会话列表按它过滤** | ⭐ 权威（v1.6.3 起为第一优先级） |
+| 扩展侧记录 | 平台 `storage.json` → `genie.userId` | 扩展宿主记录的账号，账号切换后**可能滞后** | 第二优先级 |
+| DB 会话最多 | `workbuddy.db` | 辅助兜底，只有前面都读不到才用 | 兜底 |
+| 旁证 | `logs/daemon.log` 里最近一次 `listSessions` 的 `userId` | 面板最近一次刷新实际用的 uid | 仅用于打印 |
+
+**为什么必须较真**：2026-09-22 实例中，`storage.json` 一直写着**账号 A**，客户端实际登录的却是**账号 B**（两个都是真实账号，昵称不同）。工具按旧策略每次都把数据并到 A，重启后面板（按 B 过滤）依旧空白，用户来回折腾 6 次。**两个来源不一致时，一切以客户端登录态为准，并显式传 `--target`。**
+
+**30 秒自查**：
+
+```bash
+cat ~/.workbuddy/storage/skeleton/account-snapshot.json          # 客户端登录态（真身）
+grep genie.userId "$HOME/Library/Application Support/WorkBuddy/User/globalStorage/storage.json"
+tail -c 200000 ~/.workbuddy/logs/daemon.log | grep listSessions | tail -1
+sqlite3 ~/.workbuddy/workbuddy.db "SELECT user_id,COUNT(*) FROM sessions GROUP BY user_id"
+```
+
+**左侧面板空白 = 大概率登错账号**，别急着改数据库：先看上面第 1 条和第 4 条的 uid 是否一致。不一致时，改数据没用，登录对账号才有用。
+
+**附录：强制重登手法与其局限**
+
+客户端反复自动登录到错账号时，可以先把启动快照移走，逼它弹登录：
+
+```bash
+mv ~/.workbuddy/storage/skeleton/account-snapshot.json \
+   ~/.workbuddy/storage/skeleton/account-snapshot.json.disabled-$(date +%Y%m%d-%H%M%S)
+# 然后 Cmd+Q 完全退出客户端 → 重开 → 会要求重新登录
+```
+
+⚠️ 实测局限（2026-09-22）：这招**能拿到正确账号**（登录瞬间 `LOCAL_LIST_DONE raw=117`），但**挡不住 1 分钟后的自动回切**——回切源头在加密凭据层（明文 JSON 和 Electron Local Storage 里都没有 token，疑似 `security/<uid>/cipher/entries.json.enc`），不在这个快照文件。所以真正常用的账号建议直接**把数据并过去**，而不是跟登录态搏斗。备份与回滚见 `~/.workbuddy/migrate_backups/`。
+
+**附录：强制重登的辅助脚本**
+
+```bash
+bash scripts/force-relogin.sh            # 国内版；--intl 国际版，--dir 指定目录
+bash scripts/force-relogin.sh --restore  # 回滚（把最近一个 .disabled-* 改回原名）
+```
+
+它做的事就是把 `storage/skeleton/account-snapshot.json` 移走，逼客户端弹登录。默认会检测客户端是否已退出，`--force` 可跳过。
+
+⚠️ 实测局限（2026-09-22）：这招**能拿到正确账号**（登录瞬间 `LOCAL_LIST_DONE raw=117`），但**挡不住约 1 分钟后的自动回切**——回切源头在加密凭据层（明文 JSON 和 Electron Local Storage 里都没有 token，疑似 `security/<uid>/cipher/entries.json.enc`），不在这个快照文件。所以真正常用的账号建议直接**把数据并过去**，而不是跟登录态搏斗。备份与回滚见数据目录下的 `migrate_backups/`。
+
+## 迁移边界：哪些在迁移范围，哪些不在
+
+| 数据 | 位置 | 迁移 | 说明 |
+|:---|:---|:---:|:---|
+| Session 对话记录 | `workbuddy.db` sessions 表 | ✅ | `UPDATE user_id` |
+| 长期记忆 | `memory/{uid}_memory.md` | ✅ | 追加去重合并 |
+| MCP 连接器 | `connectors/{uid}/mcp.json` | ✅ | JSON 深度合并 |
+| **云端通道映射** | `edge-sync-mapping*.db` 的 `msg_channel` | ✅ **v1.6.3 起自动处理** | 不清理的话，对话在云端仍挂在**旧账号**的通道下，EdgeSync 认为"已同步过"不会重传 → 本机看得到，**换台设备登录新账号看不到** |
+| todos / tasks | `todos/{sessionId}.json`、`tasks/{sessionId}/` | ❌ | 按 sessionId 命名，**无账号隔离**，不用迁 |
+| Skills / Automations / Settings | 全局配置 | ❌ | 无账号隔离 |
+| inspiration | `inspiration/{uid}/` | ❌ | 按 uid 分目录，需要时手动 `mv` 到目标 uid 目录 |
+| security | `security/{uid}/` | ❌ | 安全检测模块的加密库，**不要动** |
+| storage/user-\<uid\>* | `storage/` | ❌ | 客户端 UI 偏好等，按 uid 分目录，未迁移 |
+
+> `todos/` 与 `tasks/` 没有账号隔离，所以「迁移后左侧任务面板看不到任务」这类问题通常不是迁移造成的，而是新版客户端 `/todos` 只读当前 session 的内存数据（见「Phase 6：历史任务恢复」）。
 
 ## 安全规则
 

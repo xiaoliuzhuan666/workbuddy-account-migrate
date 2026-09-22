@@ -153,6 +153,17 @@ def main():
     print("=" * 70)
 
     home = prepare_fixture.build()
+
+    # 本机只有国内版数据时，跨版本端到端用例（domestic ⇄ intl）根本无从运行。
+    # 过去这里会直接抛 sqlite3 "unable to open database file" traceback，看着像脚本坏了，
+    # 实际是环境缺数据（README「项目结构」已注明）。改成显式跳过，退出码 0。
+    if not (home / ".workbuddy-ai" / "workbuddy.db").exists():
+        print()
+        print("⏭️  跳过端到端测试：本机没有国际版数据（~/.workbuddy-ai/workbuddy.db）。")
+        print("   本套用例全部是「国内版 ⇄ 国际版」跨版本场景，fixture 只能造出国内版一半。")
+        print("   这不是脚本缺陷，属于环境限制。要跑全量请先在另一版本里创建过对话。")
+        return 0
+
     print(f"\nfixture: {home}\n")
 
     sid, title = pick_test_session(home)

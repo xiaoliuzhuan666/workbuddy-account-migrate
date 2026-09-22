@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.6.2](https://img.shields.io/badge/Version-1.6.2-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.6.3](https://img.shields.io/badge/Version-1.6.3-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -53,8 +53,10 @@ WorkBuddy 切换账号 / 重新登录 / 换了腾讯云身份后，**之前的�
 | ✅ Connector MCP 连接器合并 | JSON 深度合并，目标账号已有配置保留不动 |
 | ✅ 自动备份 + 回滚 | 迁移前自动备份数据库、记忆、连接器，支持一键回滚 |
 | ✅ WAL 安全处理 | 迁移前后执行 SQLite checkpoint，确保数据持久化 |
-| ✅ 登录态权威识别 | v1.4：以 storage.json 为当前账号权威来源，DB 按 session 数最多辅助验证 |
+| ✅ 登录态权威识别 | v1.6.3：以 `account-snapshot.json` 的 `primary.uid`（客户端真实登录态，**左侧面板按它过滤**）为权威，`storage.json` 降为兜底；两来源不一致时强烈提示显式传 `--target` |
 | ✅ 迁移结果验证 | v1.3：UPDATE 后验证源 user_id 归零，确认迁移成功 |
+| ✅ 云端通道映射重置 | v1.6.3：清掉旧账号的 `edge-sync` 映射行，对话按新账号通道重新上传（回滚自动还原）；`--keep-cloud-mapping` 可关闭 |
+| 🧰 强制重登辅助脚本 | `scripts/force-relogin.sh`：客户端反复自动登录到错账号时逼它弹登录界面（附带实测局限说明） |
 | ✅ 零依赖 | 仅需 Python 3.8+，无第三方包 |
 
 ### 快速开始
@@ -64,6 +66,13 @@ git clone https://github.com/xiaoliuzhuan666/workbuddy-account-migrate.git
 cd workbuddy-account-migrate
 python3 scripts/migrate.py
 ```
+
+> 受限 shell / 沙箱环境里 `git clone` 可能报「目标路径已存在」，改用 tarball：
+> ```bash
+> mkdir -p workbuddy-account-migrate && cd workbuddy-account-migrate
+> curl -sSL https://codeload.github.com/xiaoliuzhuan666/workbuddy-account-migrate/tar.gz/refs/heads/main \
+>   | tar xz --strip-components=1
+> ```
 
 运行效果：
 
@@ -134,9 +143,16 @@ python3 scripts/migrate.py --source <USER_ID> --yes --restart
 | Session 对话记录 | `workbuddy.db` sessions 表 | `user_id` 字段 | ✅ | UPDATE user_id |
 | 长期记忆 Memory | `~/.workbuddy/memory/{uid}_memory.md` | 按文件名 | ✅ | 追加去重合并 |
 | Connector 连接器配置 | `~/.workbuddy/connectors/{uid}/mcp.json` | 按子目录 | ✅ | JSON 深度合并 |
+| **云端通道映射** | `edge-sync-mapping*.db` 的 `msg_channel` | 按 `convmsg:{uid}` 记账 | ✅ **v1.6.3 新增** | 删除旧账号的映射行，让 EdgeSync 按新账号通道重传（回滚时从备份还原） |
+| todos / tasks | `todos/{sessionId}.json`、`tasks/{sessionId}/` | 无隔离（按 sessionId） | ❌ | 不用迁；面板看不到任务是客户端只读当前 session 内存导致的 |
 | Skills 技能 | `~/.workbuddy/skills/` | 无隔离 | ❌ | 全局共享，无需迁移 |
 | Automations 定时任务 | `workbuddy.db` automations 表 | 无 user_id | ❌ | 全局共享，无需迁移 |
 | Settings / MCP / Plugins | 全局配置文件 | 无隔离 | ❌ | 全局共享，无需迁移 |
+| inspiration | `~/.workbuddy/inspiration/{uid}/` | 按 uid 子目录 | ❌ | 需要时手动 `mv` 到目标 uid 目录 |
+| security | `~/.workbuddy/security/{uid}/` | 按 uid 子目录 | ❌ | 安全检测模块的加密库，**不要动** |
+| storage/user-\<uid\>* | `~/.workbuddy/storage/` | 按 uid 子目录 | ❌ | 客户端 UI 偏好等，未迁移 |
+
+> **为什么要管「云端通道映射」**：本地 `user_id` 改对只是让**本机**看得到；对话在云端仍挂在旧账号的 `convmsg:{旧uid}` 通道下，EdgeSync 会认为"已同步过"而不重传 —— 结果换台设备登录新账号时看不到这些历史。v1.6.3 起迁移会自动清掉旧账号的映射行（删前整库备份），回滚时自动还原。
 
 ### 单对话跨版本迁移（v1.6.0）
 
@@ -229,7 +245,8 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 
 ### 工作原理
 
-**Step 1：自动诊断** — 从数据库、Memory 文件、Connector 目录三个来源自动发现所有账号。当前登录账号以 **storage.json 的 genie.userId 为权威来源**，DB 中 session 数最多的 user_id 作为辅助验证，不一致时以 storage.json 为准并发出警告（v1.4 起；此前用"最新 session"推断，旧账号的最后一条 session 可能比当前账号更新，导致误判）。
+**Step 1：自动诊断** — 从数据库、Memory 文件、Connector 目录三个来源自动发现所有账号。当前登录账号的判定顺序（v1.6.3）：**① `{数据目录}/storage/skeleton/account-snapshot.json` 的 `primary.uid`** → ② `storage.json` 的 `genie.userId` → ③ DB 中 session 数最多的 user_id。三者与 daemon 日志里的面板 uid 会一起打印出来，不一致时明确告警。
+> v1.4~v1.6.2 曾以 `storage.json` 为唯一权威，但国内版实测它与客户端真实登录态**可能长期是两个不同的 uid**，导致迁移方向每次判错、迁完左侧列表仍然空白（2026-09-22 实例：用户为此来回折腾 6 次）。**判定口径已改为「客户端登录态优先」**；也别用"最新 session"推断——旧账号切换前的最后一条 session 可能比当前账号更新。
 
 **Step 2：安全备份** — 迁移前自动备份到 `~/.workbuddy/migrate_backups/{timestamp}_{uid}/`
 
@@ -353,6 +370,42 @@ workbuddy-account-migrate/
 | 正文 id 改写范围 | 只改写 `"sessionId":"..."` 字段值。消息正文里引用到的旧 id（日志、路径）保持原样——那是用户可见内容，不应被改 |
 
 ### 更新日志
+
+#### v1.6.3 (2026-09-22)
+
+**修复：目标账号会判成"另一个账号"，迁移"成功"但左侧列表依旧空白**
+
+- **判定口径翻转**：`get_current_user_id()` 改为 **`account-snapshot.json` → `primary.uid` 优先**，`storage.json` 的 `genie.userId` 降为第二优先级、DB 会话数兜底。原因见下
+- **踩到的坑**：国内版 `storage.json` 记的账号（扩展侧）与客户端真实登录态可以是两个不同 uid，且**长期不一致**。工具当时按 `storage.json` 选目标，每次都把数据并到「面板看不到」的那个账号，用户重启后依然是空列表，来回试了 6 次
+- **diagnose 重排**：并列打印四个信号 —— 客户端登录态(account-snapshot) / 扩展侧记录(storage.json) / daemon 最近一次 `listSessions` 的 uid / DB 各账号会话数；不一致时直接给出「迁移务必带 `--target`」的结论
+- **migrate 新增 Phase 4.5 一致性检查**：目标账号 ≠ 客户端登录态时，明确列出两条补救路径（切账号看 / 回滚后加 `--target` 重跑），不再只提示"迁移完成"
+- **迁移前告警**：打印目标账号时同时打印客户端登录态，`--target` 与登录态不符会先警告（`--target` 是手动指定时提示"确认有意为之"）
+- **备份 meta 补字段**：`meta.json` 除 `target_uid` 外新增 `source_uid`、`client_login_uid`、`storage_json_uid`、`session_counts` —— 事后复盘"当时到底登在哪个账号"全靠它
+- **建议命令带 `--target`**：`--diagnose` 的迁移建议按数据量排序，并直接输出含 `--target` 的完整命令（0 数据的账号不再生成命令）
+- **修 daemon 日志解析**：嵌套 JSON 的引号是转义的（`\"userId\":\"...\"`），原正则匹配不到面板 uid
+
+**（沿用 v1.6.2）沙箱 shim 与 `--restart`**：脚本启动自动剥离 `PYTHONPATH`；`--restart` 迁移后自动重启客户端。
+
+**新增：云端通道映射重置（`edge-sync-mapping*.db`）**
+
+- 本地 `user_id` 改对只让**本机**看得到；对话在云端仍挂在 `convmsg:{旧uid}` 通道下，EdgeSync 认为"已同步过"不会重传 → **换台设备登录新账号看不到这些历史**
+- 迁移时自动删除旧账号的映射行（只删映射、不碰对话内容，删前整库备份到 `<备份>/edge-sync/`），下次启动客户端由 EdgeSync 重新上传
+- `--rollback` 会一并还原映射库；`--keep-cloud-mapping` 可跳过本步骤
+
+**新增：`scripts/force-relogin.sh`（强制重登辅助）**
+
+- 客户端反复自动登录到错账号时，移走 `storage/skeleton/account-snapshot.json` 逼它弹登录；`--restore` 还原，默认检测客户端是否已退出
+- 脚本头部如实写明实测局限：**能拿到正确账号，但挡不住约 1 分钟后的自动回切**（回切源头在加密凭据层），因此长期方案是把数据并到客户端实际登录的账号
+
+**交互向导标记目标账号**
+
+- 账号列表给「客户端登录态」那一行加 `← 客户端登录态（面板按它过滤）` 标记，并提示**目标通常就选它**，避免人工选错方向
+- 迁移前打印目标账号时同时打印客户端登录态；两者不符先告警
+
+**测试与文档**
+
+- `tests/run_tests.py`：本机缺国际版数据时显式跳过（退出码 0），不再抛 `sqlite3 "unable to open database file"` traceback
+- README/SKILL 补「迁移边界」清单（todos / inspiration / security / storage/user-* 为何不迁）、「登录态有两个来源」章节、tarball 安装方式
 
 #### v1.6.0 (2026-09-10)
 
@@ -520,6 +573,9 @@ python3 scripts/migrate.py --rollback <TAG>        # Rollback to backup
 | Session history | SQLite `user_id` field | UPDATE to new account |
 | Long-term Memory | `~/.workbuddy/memory/{uid}_memory.md` | Append + deduplicate |
 | MCP Connectors | `~/.workbuddy/connectors/{uid}/mcp.json` | JSON deep merge |
+| Cloud channel mapping | `edge-sync-mapping*.db` → `msg_channel` | v1.6.3: drop the old account's rows so EdgeSync re-uploads under the new account (restored on rollback; `--keep-cloud-mapping` opts out) |
+
+Not migrated (no account isolation): `todos/`, `tasks/`, `skills/`, automations, settings. Per-uid dirs left alone: `inspiration/{uid}/`, `security/{uid}/`, `storage/user-{uid}*`. See the Chinese section for the full boundary table.
 
 Skills, Automations, Settings are global (no user_id) — no migration needed.
 
@@ -558,6 +614,22 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - Platform note: the full cross-edition flow is only tested on Windows (Win 11 + Python 3.13); on macOS, `--list` has been verified against a real domestic-edition fixture (2026-09-21). The script itself is cross-platform — issue reports welcome.
 
 ### Changelog
+
+#### v1.6.3 (2026-09-22)
+
+**Fixed: the target account was resolved to the wrong uid — migration "succeeds" but the sidebar stays empty**
+
+- `get_current_user_id()` now prefers **`account-snapshot.json` → `primary.uid`** (the client's real login, which is what the session list filters by). `storage.json`'s `genie.userId` drops to second priority, DB session count is the last resort
+- Why: on the domestic edition those two sources can hold **two different uids** for a long time. The tool used to pick `storage.json`, so every run merged data into the account the UI never reads — the user retried 6 times and still saw an empty sidebar
+- `--diagnose` now prints all four signals side by side (client login / storage.json / last daemon `listSessions` uid / per-account session counts) and states the `--target` conclusion explicitly
+- `migrate()` gained a Phase 4.5 consistency check: when the target ≠ client login it lists the two recovery paths instead of just printing "done"
+- Backup `meta.json` now records `source_uid`, `client_login_uid`, `storage_json_uid`, `session_counts` for post-mortems
+- Fixed daemon-log parsing: nested JSON escapes its quotes (`\"userId\":\"...\"`), so the previous regex never matched
+- **New: cloud channel mapping reset** — `edge-sync-mapping*.db` rows still point at the old account's channel, so EdgeSync believes the conversations are already synced and never re-uploads them; the migration now deletes only those rows (full DB backed up first, restored by `--rollback`, opt out with `--keep-cloud-mapping`)
+- **New: `scripts/force-relogin.sh`** — moves `storage/skeleton/account-snapshot.json` aside to force a fresh login; its header documents the measured limitation (works, but the client may switch back after ~1 minute, so merging data is the durable fix)
+- Interactive wizard now tags the client-login account with `← 客户端登录态（面板按它过滤）`
+- `tests/run_tests.py` skips gracefully (exit 0) when the international edition is absent
+- Docs: migration boundary list, two-login-sources section, tarball install fallback
 
 #### v1.6.2 (2026-09-22)
 
