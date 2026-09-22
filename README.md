@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.6.1](https://img.shields.io/badge/Version-1.6.1-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.6.2](https://img.shields.io/badge/Version-1.6.2-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -119,6 +119,9 @@ python3 scripts/migrate.py --dir ~/.workbuddy-ai
 
 # 回滚到指定备份
 python3 scripts/migrate.py --rollback <TAG>
+
+# 迁移完成后自动重启 WorkBuddy 客户端（macOS），会话列表立即刷新
+python3 scripts/migrate.py --source <USER_ID> --yes --restart
 ```
 
 > **国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。其他命令和行为完全一致。
@@ -395,6 +398,18 @@ workbuddy-account-migrate/
 - 回滚完整性：Connectors / Memory 的恢复不再要求目标当前必须存在，只要备份里有就恢复。原先迁移后清理过目录就恢复不了
 - Memory 迁移在 `memory/` 目录不存在时自动创建，不再报错
 
+#### v1.6.2 (2026-09-22)
+
+**修复：WorkBuddy 会话内运行被沙箱 shim 劫持导致迁移崩溃**
+
+- WorkBuddy 会话的 Bash 里运行时，注入的 `PYTHONPATH` 指向沙箱 shim（sitecustomize.py）会劫持 `Path.mkdir`：即使传 `exist_ok=True`，目录已存在也抛 `PermissionError EEXIST`，迁移在备份阶段就崩溃（托管 Python 和系统 Python 都中招）
+- 现在脚本启动时自动剥离 `PYTHONPATH` 并 re-exec 自身（等价于 `env -u PYTHONPATH python3 migrate.py ...`，但无需记住特殊用法）；所有 `mkdir` 处保留 `exists()` 先判断作为双保险
+
+**新增：`--restart` 迁移完成后自动重启客户端**
+
+- `python3 migrate.py --source <UID> --yes --restart`：迁移/回滚完成后延迟数秒自动退出并重新拉起 WorkBuddy（macOS），左侧会话列表立即刷新，不用手动重启
+- 采用后台延迟执行（脱离进程组），脚本先输出完整结果再触发重启；在 WorkBuddy 会话内调用时当前 AI 会话会中断，属预期行为。Windows / Linux 提示手动重启
+
 #### v1.6.1 (2026-09-21)
 
 **修复：`migrate_session.py` 行为与文档不符 / 静默失败**（全部改动来自 [@bukall](https://github.com/bukall)，PR #5）
@@ -543,6 +558,18 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 - Platform note: the full cross-edition flow is only tested on Windows (Win 11 + Python 3.13); on macOS, `--list` has been verified against a real domestic-edition fixture (2026-09-21). The script itself is cross-platform — issue reports welcome.
 
 ### Changelog
+
+#### v1.6.2 (2026-09-22)
+
+**Fixed: sandbox-shim hijack crashing runs inside WorkBuddy sessions**
+
+- When run from a WorkBuddy session's Bash, the injected `PYTHONPATH` points to a sandbox shim (sitecustomize.py) that hijacks `Path.mkdir`: even with `exist_ok=True`, an existing directory raises `PermissionError EEXIST`, crashing the migration at the backup phase (both the managed and the system Python are affected)
+- The script now strips `PYTHONPATH` on startup and re-executes itself (equivalent to `env -u PYTHONPATH python3 migrate.py ...` without having to remember it); all `mkdir` call sites keep an `exists()` pre-check as a second line of defense
+
+**Added: `--restart` to auto-restart the client after migration**
+
+- `python3 migrate.py --source <UID> --yes --restart`: after migration/rollback, automatically quits and relaunches WorkBuddy (macOS) after a short delay, refreshing the session list immediately — no manual restart needed
+- Implemented as a detached background job: the script prints its full output first, then triggers the restart; when invoked inside a WorkBuddy session, the current AI session will be interrupted (expected). Windows / Linux print a manual-restart reminder
 
 #### v1.6.1 (2026-09-21)
 

@@ -1,7 +1,7 @@
 ---
 name: 账号迁移工具
 description: WorkBuddy 账号切换后一键同步数据，将旧账号的 Session 历史、Memory 记忆、Connector 配置迁移到当前账号。触发关键词：切账号、迁移、同步数据、账号切换、数据丢失、记录没了。
-version: 1.6.1
+version: 1.6.2
 agent_created: true
 ---
 
@@ -44,6 +44,7 @@ python3 scripts/migrate.py --source <USER_ID>      # 指定源账号迁移（高
 python3 scripts/migrate.py --intl                  # 国际版（数据目录 ~/.workbuddy-ai）
 python3 scripts/migrate.py --dir ~/.workbuddy-ai   # 显式指定数据目录（优先级最高）
 python3 scripts/migrate.py --rollback <TAG>        # 回滚到指定备份
+python3 scripts/migrate.py --source <UID> --yes --restart  # 迁移后自动重启客户端（macOS，会话列表立即刷新）
 
 python3 scripts/migrate_session.py --mode copy     # 迁移后保留源（默认 move 会删源）
 python3 scripts/migrate_session.py --dry-run       # 只预览不写盘
@@ -334,7 +335,7 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 | **storage.json 中 genie.userId 过时** | **账号切换后 storage.json 的 genie.userId 可能没有同步更新，仍为旧 ID。迁移脚本读到旧 ID 作为 target，导致 source=target 跳过迁移** | **v1.3 曾优先用 DB 最新 session 推断，但旧账号最后一条 session 可能更新；v1.4 改为 storage.json 权威 + DB session 数最多交叉验证，不一致时警告** |
 | **WAL 未 checkpoint 导致迁移丢失** | **即使 UPDATE sessions 成功 + commit，如果 WAL 日志没有 checkpoint，客户端重启后可能读不到修改，数据恢复为旧状态** | **v1.3 修复：迁移前后各做一次 PRAGMA wal_checkpoint(TRUNCATE)，并验证源 user_id 归零** |
 | **AI 手动迁移时的常见错误** | **AI 在对话中直接写 SQL 迁移时，可能：(1) 从 storage.json 读到错误的 target_uid (2) 忘记 WAL checkpoint (3) 不验证结果** | **必须：(1) 从当前对话 session 的 user_id 确定目标 (2) UPDATE 后做 WAL checkpoint (3) 验证源 user_id 归零** |
-| **WorkBuddy 会话内运行脚本被沙箱 shim 劫持** | **在 WorkBuddy 会话的 Bash 里跑 migrate.py 时，PYTHONPATH 指向沙箱 shim（sitecustomize.py），拦截 Path.mkdir；migrate_backups 目录已存在时，备份阶段 mkdir(exist_ok=True) 仍抛 PermissionError EEXIST，迁移在动手前就崩溃。托管 Python 和系统 Python 都会被劫持** | **用 `env -u PYTHONPATH python3 scripts/migrate.py ...` 运行，剥掉 shim 环境变量（2026-09-20 实战踩坑）** |
+| **WorkBuddy 会话内运行脚本被沙箱 shim 劫持** | **在 WorkBuddy 会话的 Bash 里跑 migrate.py 时，PYTHONPATH 指向沙箱 shim（sitecustomize.py），拦截 Path.mkdir；目录已存在时 mkdir(exist_ok=True) 抛 PermissionError EEXIST。托管 Python 和系统 Python 都会被劫持** | **v1.6.2 起脚本启动时自动剥离 PYTHONPATH 并 re-exec，直接 `python3 scripts/migrate.py ...` 即可；旧版本用 `env -u PYTHONPATH python3 scripts/migrate.py ...`（2026-09-20 实战踩坑）** |
 
 ## 安全规则
 
