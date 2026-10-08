@@ -50,7 +50,7 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 **其他模式：**
 
 ```bash
-python3 scripts/migrate.py --diagnose              # 仅诊断，查看数据分布
+python3 scripts/migrate.py --diagnose              # 仅诊断，查看数据分布（只读，无需关客户端）
 python3 scripts/migrate.py --source <USER_ID>      # 指定源账号迁移（高级用户）
 python3 scripts/migrate.py --intl                  # 国际版（数据目录 ~/.workbuddy-ai）
 python3 scripts/migrate.py --dir ~/.workbuddy-ai   # 显式指定数据目录（优先级最高）
@@ -65,7 +65,30 @@ python3 scripts/migrate_session.py --backups       # 查看可回滚的备份
 python3 scripts/migrate_session.py --rollback <TAG>
 ```
 
-**国内版 vs 国际版**：唯一区别是数据目录不同——国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`。目录优先级：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空判为国际版）。交互式向导会提示选择版本，默认取自动探测结果。
+> ⚠️ `migrate.py` 的 `--source` 迁移与 `--rollback` **同样会检测客户端进程并拒绝执行**
+> （v1.6.1 起与 `migrate_session.py` 对齐）；`--diagnose` / `--list-tasks` 这类只读操作不检测。
+> 确知风险时可加 `--force` 跳过检测。
+>
+> 只想绕过「检测本身失败」（查不出进程列表）时用 `--assume-clients-closed`：它按
+> "我已确认客户端退出"继续，但**真检测到客户端仍在运行时照样拦截**；`--force` 则把
+> 整项检查一起关掉。两个脚本都支持这两个开关。
+>
+> 被这条守卫拦下时，真终端里会**先问一次**：输入 `y` = 当场确认接受风险并继续，
+> 回车 / 其他 = 取消。非终端（CI、管道、重定向）不询问、直接拒绝 —— 问不到人时
+> `input()` 要么立刻 EOF 要么把进程挂住。
+
+**退出码**（自动化里别只看 `rc == 0`）：
+
+| 码 | 含义 | 谁会产生 |
+|---|---|---|
+| `0` | 成功 | 三个脚本 |
+| `1` | 参数错误 / 用户取消 / 业务性中止（备份失败、标签不合法、被占用等） | 三个脚本 |
+| `2` | 被「客户端仍在运行」守卫拦下（非终端，或终端里回答了否） | 三个脚本 |
+| `3` | **未做改动**：源账号没有数据，或源有数据但与目标完全重合、合并无新增 | **只有 `migrate.py`** |
+
+`3` 不是新故障 —— v1.6.1 之前这情况返回 `0`，长期被当成"成功"。
+
+**国内版 vs 国际版**：不只是数据目录不同——**登录态来源也不同**。国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`；两个版本都以数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid` 为登录态权威来源，国内版额外可用平台 `storage.json` 的 `genie.userId` 兜底，而**国际版一律不读平台 `storage.json`**（它是国内版的登录态文件；读了会把国内版 uid 当成国际版当前账号，`--intl` 迁移后表现为"迁移成功但所有对话消失"）。目录优先级：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空判为国际版）。交互式向导会提示选择版本，默认取自动探测结果。
 
 ## 跨设备项目迁移（v1.7，issue #8）
 
@@ -86,7 +109,7 @@ python3 scripts/migrate_project.py --rollback <TAG>  # 导入回滚（整库快�
 - slug 一律按**目标机新路径**重推导，不得沿用源 slug（沿用 = 客户端按 `projects/<slug>/<sid>.jsonl` 找不到，"迁移成功却打不开"）
 - 冲突语义：**同 id 覆盖**（同一个包反复导入不出双份——"两地交替"靠这个撑住）；同标题不同 id 默认跳过；无 TTY 降级跳过，`--on-conflict overwrite` 显式批量覆盖
 - 包内容：sessions/usage 行 + 正文 + tool-results + todos/tasks + `{项目}/.workbuddy/` 工作区记忆（可选）。**账号级 memory/connectors 不在范围**
-- 测试：`python3 tests/run_project_tests.py`（34 项合成 fixture，两台"虚拟机器"全链路，不依赖真实数据）
+- 测试：`python3 tests/run_project_tests.py`（37 项合成 fixture，两台"虚拟机器"全链路，不依赖真实数据）
 
 ## 问题背景
 
@@ -113,19 +136,32 @@ WorkBuddy 数据存储架构：**本地优先 + 账号隔离**
    - `~/.workbuddy/connectors/` 下的子目录
 3. 展示对比表格，用户输入序号选择要迁移的源账号（无需知道 user_id）
 
-**⚠️ 获取当前 user_id 的关键逻辑（v1.6 修订，按版本区分）**：
+**⚠️ 获取当前 user_id 的关键逻辑（v1.6.1 修订，两个脚本口径统一）**：
 
-v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号在切换前的最后一条 session 可能比当前账号的 session 更新**，导致误把旧账号当成当前账号。现在的策略是按版本分开：
+当前策略（`migrate.py:get_current_user_id()` 与 `migrate_session.py:get_current_uid()` 完全一致）：
 
-1. **国内版**：平台 `storage.json` 的 `genie.userId` 为登录态权威来源
-2. **国际版**：数据目录内 `storage/skeleton/account-snapshot.json` 的 `primary.uid` 为权威来源
-   （跨平台路径统一，不依赖 `%APPDATA%` 探测）
-3. DB 中 session 数最多的 user_id 仅作辅助交叉验证；两者不一致时优先登录态来源并**发出警告**
-4. **最可靠的终极验证**：查 DB 最新 session（`ORDER BY updated_at DESC LIMIT 1`），用其标题确认是否为当前正在进行的对话——当前对话本身的 user_id 就是真实登录身份（2026-09-20 实战验证有效）
+1. **首选**：数据目录内 `storage/skeleton/account-snapshot.json` → `primary.uid`。
+   两个版本都会写它，跨平台路径统一（不依赖 `%APPDATA%` 探测），且天然区分国内/国际版
+2. **兜底**：国内版平台 `storage.json` 的 `genie.userId`。**国际版一律不读它** ——
+   那是国内版登录态文件，读了会把国内版 uid 当成国际版当前账号
+3. DB 中 session 数最多的 user_id 仅作辅助交叉验证；登录态来源与 DB 推断不一致时，
+   优先登录态来源并**发出警告**
+4. **人工复核手段**：查 DB 最新一条 session（`ORDER BY updated_at DESC LIMIT 1`）看它的标题
+   是不是你正在用的对话——当前对话所属的 user_id 就是真实登录身份（2026-09-20 实战验证有效）。
+   注意这只是**给你核对用的**：脚本里的第 3 条辅助判断用的是"session 数最多的 user_id"，
+   不是"最新的"，两者不要混为一谈
 
-> 注意上述第 1 条与下面最佳实践第 3 条并不矛盾：**脚本**按版本优先级读取登录态，
-> 但**你在对话里手动判断**时，`storage.json` 可能未随账号切换即时更新，
-> 此时应当以"当前对话所属 user_id"为准。
+> **版本演进（历史，别按旧口径理解）**：
+> - v1.3 曾"优先从 DB 最新 session 推断"——实战发现**旧账号在切换前的最后一条 session
+>   可能比当前账号的 session 更新**，会误把旧账号当成当前账号
+> - v1.4～v1.6.0 改成"按版本区分"（国内版 `storage.json` 权威、国际版 `account-snapshot` 权威），
+>   但两个脚本的**优先级顺序相反**：`migrate.py` 把平台 storage.json 排前面，
+>   `migrate_session.py` 把 account-snapshot 排前面 → 同一台机器上可能解析出不同的"当前账号"
+> - **v1.6.1 起统一为上面这套「account-snapshot 优先、平台 storage.json 兜底」**
+
+> 上面第 1～2 条与下面最佳实践第 3 条并不矛盾：**脚本**按「account-snapshot 优先、
+> 平台 storage.json 兜底」读取登录态，但**你在对话里手动判断**时，`storage.json`
+> 可能未随账号切换即时更新，此时应当以"当前对话所属 user_id"为准。
 
 **AI 手动迁移时的最佳实践**：
 
@@ -135,15 +171,30 @@ v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号�
 3. **不要单独依赖** `storage.json` 的 `genie.userId`——账号切换后它可能没同步更新（仍为旧 ID），
    只把它当作辅助信号，与当前对话的 user_id 交叉核对
 4. 执行 UPDATE 后**必须**做 `PRAGMA wal_checkpoint(TRUNCATE)` 确保持久化；
-   并留意 checkpoint 返回值的 busy 标志，busy≠0 说明有进程占锁、结果尚未落盘
-5. 验证 `SELECT COUNT(*) FROM sessions WHERE user_id = '{旧ID}'` 确认归零
+   并留意 checkpoint 返回值 `(busy, log, checkpointed)` 的 busy 标志：
+   busy > 0 说明有进程占锁、结果尚未落盘；**busy == -1 表示库不在 WAL 模式，不是占锁**，
+   别把它误当成"客户端还在跑"
+5. 验证 `SELECT COUNT(*) FROM sessions WHERE user_id = ?`（参数填旧 ID）确认归零
+6. user_id 这类外部值**一律用 `?` 占位符**，不要把变量 f-string 拼进 SQL：
+   本 Skill 的示例会被 AI 直接照搬执行，拼字符串一旦成为习惯，遇到带引号的值
+   就会写出能改坏整张表的语句
 
 ### Phase 2：备份（必须）
 
-1. 备份 `workbuddy.db`：
+1. 备份 `workbuddy.db`：**不要用 `cp`**。数据库是 WAL 模式，只复制主库文件会漏掉
+   `workbuddy.db-wal` 里还没落盘的数据，备份是陈旧快照。用 sqlite backup API：
    ```bash
-   cp ~/.workbuddy/workbuddy.db ~/.workbuddy/workbuddy.db.bak.$(date +%Y%m%d%H%M%S)
+   python3 -c "
+   import sqlite3, sys
+   src, dst = sys.argv[1], sys.argv[2]
+   s = sqlite3.connect('file:' + src + '?mode=ro', uri=True)
+   d = sqlite3.connect(dst)
+   with d: s.backup(d)
+   s.close(); d.close()
+   print('backup ok ->', dst)
+   " ~/.workbuddy/workbuddy.db ~/.workbuddy/workbuddy.db.bak.$(date +%Y%m%d%H%M%S)
    ```
+   （临时应急才用 `cp`，但必须**先关闭客户端**并一并带上 `-wal` / `-shm`）
 2. 备份 Memory 文件：
    ```bash
    cp ~/.workbuddy/memory/{target_user_id}_memory.md \
@@ -160,16 +211,19 @@ v1.3 曾改为"优先从 DB 最新 session 推断"，但实战发现**旧账号�
 #### 3.1 Session 历史迁移
 
 ```bash
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('$HOME/.workbuddy/workbuddy.db')
+SOURCE_UID='<源user_id>' TARGET_UID='<目标user_id>' python3 - <<'PY'
+import os, sqlite3
+# 外部值经环境变量传入；把它们拼进 SQL 字符串的例子会被 AI 照搬，值里带个引号
+# 就能写出改坏整张表的语句，所以这里一律用 ? 占位符
+src_uid, dst_uid = os.environ['SOURCE_UID'], os.environ['TARGET_UID']
+conn = sqlite3.connect(os.path.expanduser('~/.workbuddy/workbuddy.db'))
 cur = conn.cursor()
 
 # 迁移前 WAL checkpoint
 cur.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 
-# 执行迁移
-cur.execute(\"UPDATE sessions SET user_id = '{target_user_id}' WHERE user_id = '{source_user_id}'\")
+# 执行迁移：参数化查询（占位符），不做字符串拼接
+cur.execute('UPDATE sessions SET user_id = ? WHERE user_id = ?', (dst_uid, src_uid))
 print(f'Migrated {cur.rowcount} sessions')
 conn.commit()
 
@@ -178,7 +232,7 @@ cur.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 print(f'WAL checkpoint: {cur.fetchone()}')
 
 # 验证源 user_id 归零
-cur.execute(\"SELECT COUNT(*) FROM sessions WHERE user_id = '{source_user_id}'\")
+cur.execute('SELECT COUNT(*) FROM sessions WHERE user_id = ?', (src_uid,))
 remaining = cur.fetchone()[0]
 if remaining > 0:
     print(f'⚠️ 警告：源账号仍有 {remaining} 个 session 未迁移！')
@@ -186,7 +240,7 @@ else:
     print('✅ 验证通过：源账号 session 已全部迁移')
 
 conn.close()
-"
+PY
 ```
 
 **注意**：
@@ -195,71 +249,147 @@ conn.close()
 
 #### 3.2 Memory 迁移
 
-Memory 是追加式文本文件，策略是**合并而非覆盖**：
+Memory 是追加式文本文件，策略是**合并而非覆盖**。注意两点：
+
+1. 必须**显式 `encoding="utf-8"`**（Windows 裸 `open()` 按 GBK 解码会直接失败）
+2. 结构化 Memory 的正文在一个 `<!-- RAW_JSON_START … RAW_JSON_END -->` 注释块里，
+   **按块去重**，不要按行去重——按行去重会把同一个 RAW_JSON 块拆散重复追加
 
 ```bash
 python3 -c "
-import os
+import json, os, re
 home = os.path.expanduser('~')
 src = f'{home}/.workbuddy/memory/{source_user_id}_memory.md'
 dst = f'{home}/.workbuddy/memory/{target_user_id}_memory.md'
+RAW = re.compile(r'<!--\s*RAW_JSON_START(.*?)RAW_JSON_END\s*-->', re.DOTALL)
+
+def blocks(text):
+    out = []
+    for m in RAW.finditer(text):
+        try:
+            b = json.loads(m.group(1).strip()).get('memoryBlock', '')
+        except Exception as e:
+            print('  ⚠️  有块解析失败，不参与去重:', e); continue
+        if b:
+            out.append(b)
+    return out
+
+def atomic_write(path, text):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text); f.flush()
+    os.replace(tmp, path)
 
 if not os.path.exists(src):
     print('No source memory file, skipping')
-elif not os.path.exists(dst):
-    # 目标不存在，直接复制
-    with open(src) as f: content = f.read()
-    with open(dst, 'w') as f: f.write(content)
-    print('Copied memory (target was empty)')
 else:
-    # 目标已存在，追加去重
-    with open(src) as f: src_content = f.read()
-    with open(dst) as f: dst_content = f.read()
-    # 找出源中有但目标中没有的段落
-    src_lines = set(src_content.strip().split('\n'))
-    dst_lines = set(dst_content.strip().split('\n'))
-    new_lines = [l for l in src_content.strip().split('\n') if l not in dst_lines]
-    if new_lines:
-        with open(dst, 'a') as f:
-            f.write('\n\n## Migrated from {source_user_id}\n\n')
-            f.write('\n'.join(new_lines))
-        print(f'Appended {len(new_lines)} unique lines')
+    src_text = open(src, encoding='utf-8').read().strip()
+    if not src_text:
+        print('Source memory is empty, skipping')
+    elif not os.path.exists(dst):
+        atomic_write(dst, src_text); print('Copied memory (target was empty)')
     else:
-        print('No new content to migrate')
+        dst_text = open(dst, encoding='utf-8').read().strip()
+        src_b, dst_b = blocks(src_text), blocks(dst_text)
+        if src_b and dst_b:
+            pending = [b for b in src_b if b.strip() and b not in dst_b]
+            if not pending:
+                print('Nothing new to migrate (block-level dedupe)')
+            else:
+                chunks = [m.group(0) for m in RAW.finditer(src_text)
+                          if json.loads(m.group(1).strip()).get('memoryBlock', '') in set(pending)]
+                # 原子写：追加到一半失败会留下半截未闭合的 RAW_JSON 块
+                atomic_write(dst, dst_text + '\n\n---\n## Migrated from {source_user_id}\n\n'
+                                  + '\n\n'.join(chunks) + '\n')
+                print(f'Appended {len(chunks)} memory block(s)')
+        else:
+            # 旧格式（无 RAW_JSON）：退回按行去重
+            dst_lines = set(dst_text.split('\n'))
+            new_lines = [l for l in src_text.split('\n') if l.strip() and l not in dst_lines]
+            if new_lines:
+                atomic_write(dst, dst_text + '\n\n---\n## Migrated from {source_user_id}\n\n'
+                                  + '\n'.join(new_lines) + '\n')
+                print(f'Appended {len(new_lines)} unique lines')
+            else:
+                print('No new content to migrate')
 "
 ```
 
 #### 3.3 Connector 配置迁移
 
-Connector 配置是 JSON 文件，策略是**深度合并**（目标没有的 key 从源补充，已有的保留）：
+Connector 配置是 JSON 文件，策略是**深度合并**（目标没有的 key 从源补充，已有的保留）。
+
+两个容易做错的细节：
+
+1. **目标侧的空壳不算「已有」**：`args: []` / `env: {}` / `command: ""` 应当从源补齐，
+   否则源里同名 key 的实质配置会被空壳挡在外面，等于没合并。
+2. **冲突必须报告**：两边都配了不同内容时按「目标已有配置保留不动」保留目标值，
+   但一定要列出来告诉用户。以前是静默跳过、还打印「无新增内容」，
+   用户会以为源配置已经合并进来了。list（`args`）不做拼接。
+
+⚠️ **不要只比较顶层 key 再决定合不合并**：`mcp.json` 结构是 `{"mcpServers": {...}}`，
+顶层只有一个 key。目标一旦已有 `mcpServers`，"没有新增顶层 key" 就会让整个文件被跳过，
+一个 server 都合不进去（这正是 v1.6.1 修掉的那个 bug）。做法是**先递归合并、再比较合并前后是否变化**：
 
 ```bash
 python3 -c "
-import json, os, shutil
+import json, os
 home = os.path.expanduser('~')
 src_dir = f'{home}/.workbuddy/connectors/{source_user_id}'
 dst_dir = f'{home}/.workbuddy/connectors/{target_user_id}'
 
+def atomic_write(p, text):
+    # 先写 .tmp 再 os.replace：直接覆盖写一半断电会留下截断的 JSON
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text)
+    os.replace(tmp, p)
+
+def is_unconfigured(v):
+    # 空壳视为「没配过」，否则 args 列表会把源的配置挡在外面
+    return v is None or v == '' or v == [] or v == {}
+
+def deep_merge(src, dst, path='', stats=None):
+    if stats is None:
+        stats = {'added': [], 'conflicts': []}
+    for k, v in src.items():
+        here = f'{path}.{k}' if path else str(k)
+        cur = dst.get(k, None)
+        if k not in dst or is_unconfigured(cur):
+            dst[k] = v
+            stats['added'].append(here)
+        elif isinstance(v, dict) and isinstance(cur, dict):
+            deep_merge(v, cur, here, stats)
+        elif v != cur:
+            stats['conflicts'].append(here)   # 保留目标值，但必须报告
+    return stats
+
+os.makedirs(dst_dir, exist_ok=True)   # connectors/ 本身可能不存在
 for fname in ['mcp.json', 'connector-states.json']:
     src_file = os.path.join(src_dir, fname)
     dst_file = os.path.join(dst_dir, fname)
     if not os.path.exists(src_file):
         continue
-    with open(src_file) as f: src_data = json.load(f)
+    # 必须显式 utf-8：Windows 裸 open() 按 GBK 解码中文会失败
+    with open(src_file, encoding='utf-8') as f: src_data = json.load(f)
     if os.path.exists(dst_file):
-        with open(dst_file) as f: dst_data = json.load(f)
-        # 深度合并
+        with open(dst_file, encoding='utf-8') as f: dst_data = json.load(f)
         if isinstance(src_data, dict) and isinstance(dst_data, dict):
-            for k, v in src_data.items():
-                if k not in dst_data:
-                    dst_data[k] = v
-            with open(dst_file, 'w') as f: json.dump(dst_data, f, indent=2)
-            print(f'Merged {fname}')
+            before = json.dumps(dst_data, sort_keys=True, ensure_ascii=False)
+            stats = deep_merge(src_data, dst_data)
+            n = len(stats['added'])
+            if json.dumps(dst_data, sort_keys=True, ensure_ascii=False) == before:
+                print(f'Skipped {fname} (nothing new)')
+            else:
+                atomic_write(dst_file, json.dumps(dst_data, indent=2, ensure_ascii=False))
+                print(f'Merged {fname}: +{n}')
+            for c in stats['conflicts']:
+                print(f'  ! kept target value at {c}')
         else:
-            # 非字典类型，不覆盖
             print(f'Skipped {fname} (type conflict)')
     else:
-        with open(dst_file, 'w') as f: json.dump(src_data, f, indent=2)
+        with open(dst_file, 'w', encoding='utf-8') as f:
+            json.dump(src_data, f, indent=2, ensure_ascii=False)
         print(f'Copied {fname}')
 "
 ```
@@ -363,11 +493,11 @@ for f in glob.glob(os.path.expanduser("~/.workbuddy/tasks/*/*.json")):
 | Skills 全局共享 | 不按账号隔离 | 无需迁移 |
 | 修改 DB 后需重启 | WorkBuddy 客户端有内存缓存 | 迁移后提示重启 |
 | workbuddy.db 有 WAL 模式 | SQLite WAL 日志可能导致数据不一致 | 迁移前先 checkpoint |
-| 迁移中创建的会话 user_id 不匹配 | 迁移脚本运行时，当前对话可能以旧 user_id 写入 sessions 表 | Phase 4 验证后追加检查：`SELECT COUNT(*) FROM sessions WHERE user_id NOT IN (target)` 并修复 |
+| 迁移中创建的会话 user_id 不匹配 | 迁移脚本运行时，当前对话可能以旧 user_id 写入 sessions 表 | Phase 4 用**另开的只读连接**重查源账号 session 数是否归零（同一连接必然看到自己的写入，不能作证据；checkpoint 未完成时查询结果也不可信，脚本会明确说"校验未完成"而不是报成功）。`migrate_session.py` 每处写入也会回查命中行数。**脚本不会自动改回**，发现残留会打印告警要求人工确认 |
 | **历史任务 UI 不可见** | **新版 /todos 只读当前 session 内存，不扫描 `tasks/` 目录** | **AI 用 TaskCreate 工具重新创建 pending 任务** |
 | **tasks 文件格式兼容** | **旧版任务 JSON 有 subject/description/status 等字段，新版 TaskCreate 参数格式一致** | **字段可直接映射** |
-| **storage.json 中 genie.userId 过时** | **账号切换后 storage.json 的 genie.userId 可能没有同步更新，仍为旧 ID。迁移脚本读到旧 ID 作为 target，导致 source=target 跳过迁移** | **v1.3 曾优先用 DB 最新 session 推断，但旧账号最后一条 session 可能更新；v1.4 改为 storage.json 权威 + DB session 数最多交叉验证，不一致时警告** |
-| **WAL 未 checkpoint 导致迁移丢失** | **即使 UPDATE sessions 成功 + commit，如果 WAL 日志没有 checkpoint，客户端重启后可能读不到修改，数据恢复为旧状态** | **v1.3 修复：迁移前后各做一次 PRAGMA wal_checkpoint(TRUNCATE)，并验证源 user_id 归零** |
+| **storage.json 中 genie.userId 过时** | **账号切换后 storage.json 的 genie.userId 可能没有同步更新，仍为旧 ID。迁移脚本读到旧 ID 作为 target，导致 source=target 跳过迁移** | **改为 `account-snapshot.json`（数据目录内，两版本都写）优先，平台 `storage.json` 只作兜底；DB 按 session 数最多交叉验证，不一致时警告（v1.6.1 起两个脚本口径统一）** |
+| **WAL 未 checkpoint 导致迁移丢失** | **即使 UPDATE sessions 成功 + commit，如果 WAL 日志没有 checkpoint，客户端重启后可能读不到修改，数据恢复为旧状态** | **迁移前后各做一次 `PRAGMA wal_checkpoint(TRUNCATE)`，并用另一只只读连接验证源 user_id 归零（v1.3 起；v1.6.1 起额外判断 checkpoint 的 busy 标志）** |
 | **AI 手动迁移时的常见错误** | **AI 在对话中直接写 SQL 迁移时，可能：(1) 从 storage.json 读到错误的 target_uid (2) 忘记 WAL checkpoint (3) 不验证结果** | **必须：(1) 从当前对话 session 的 user_id 确定目标 (2) UPDATE 后做 WAL checkpoint (3) 验证源 user_id 归零** |
 | **WorkBuddy 会话内运行脚本被沙箱 shim 劫持** | **在 WorkBuddy 会话的 Bash 里跑 migrate.py 时，PYTHONPATH 指向沙箱 shim（sitecustomize.py），拦截 Path.mkdir；目录已存在时 mkdir(exist_ok=True) 抛 PermissionError EEXIST。托管 Python 和系统 Python 都会被劫持** | **v1.6.2 起脚本启动时自动剥离 PYTHONPATH 并 re-exec，直接 `python3 scripts/migrate.py ...` 即可；旧版本用 `env -u PYTHONPATH python3 scripts/migrate.py ...`（2026-09-20 实战踩坑）** |
 | **登录态有两个来源，可能长期不一致** | **国内版 `storage.json` 的 `genie.userId`（扩展侧记录）与 `storage/skeleton/account-snapshot.json` 的 `primary.uid`（客户端真实登录态）可能是两个不同的 uid；左侧会话列表按后者过滤** | **v1.6.3 起目标账号改为 account-snapshot.json 优先，diagnose 并列展示三个来源；迁移务必显式 `--target <客户端登录态 uid>`（2026-09-22 实例：反复迁到 storage.json 里的旧 uid，重启后面板始终空白，来回折腾 6 次）** |
@@ -450,14 +580,29 @@ bash scripts/force-relogin.sh --restore  # 回滚（把最近一个 .disabled-* 
 
 ### 前置条件（强制）
 
-**两个版本的 WorkBuddy 客户端都必须关闭**，脚本会检测进程并拒绝执行：
+**两个版本的 WorkBuddy 客户端都必须关闭**，脚本会检测进程并拒绝执行。
+**迁移与 `--rollback` 都会检测**（回滚同样要改库 + 删文件，客户端在跑时内存缓存会把回滚结果
+覆盖回去）；只有只读操作（`--list` / `--backups` / `--dry-run`）不检测：
 
 ```python
-# Windows: tasklist /FO CSV /NH → 匹配 workbuddy|codebuddy
-# macOS/Linux: ps -eo comm=     → 匹配 workbuddy|codebuddy
+# Windows:   tasklist /FO CSV /NH        → 按映像名匹配，并用 PID 排除脚本自身
+# macOS/Linux: ps -eo pid=,comm= 与 ps -eo pid=,args=
+#              （comm 只有进程名，Electron 应用的进程名常是包名，要靠 args 匹配安装路径）
 ```
 
-原因：① 数据还在 WAL 没落盘；② 客户端退出时内存缓存会覆盖写入；③ 两个客户端同时持锁。
+⚠️ **必须排除脚本自身**：仓库目录名就叫 `workbuddy-account-migrate`，`ps -eo args=` 里
+`python3 .../workbuddy-account-migrate/scripts/migrate_session.py` 这一行自己就会命中关键字，
+不排除的话用户会被"检测到客户端正在运行"无条件拦住，只能加 `--force` 把整项检查关掉。
+另外要检查命令的 `returncode`：命令失败但没抛异常时 stdout 为空，
+那样会把"检测失败"当成"客户端已关闭"。
+
+> **实现只有一份**：进程检测（`PROC_KEYWORDS` / `_is_self_process` / `_client_display_name` /
+> `find_running_clients` / `require_clients_closed`）全部在 `scripts/migrate.py` 里；
+> `scripts/migrate_session.py` 只做一层薄委托（`require_clients_closed` → `legacy.*`）。
+> 这样两个脚本不会再各自漂移，测试也只需打桩 `migrate.find_running_clients` 一处。
+> 改检测逻辑时改 `migrate.py` 即可，两边同时生效。
+
+原因（为什么必须关闭）：① 数据还在 WAL 没落盘；② 客户端退出时内存缓存会覆盖写入；③ 两个客户端同时持锁。
 
 ### 一个对话 = 5 样东西
 
@@ -539,7 +684,7 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 
 > 曾经 `mode` 参数收下却没用：跨账号 + copy 走的是 UPDATE，源账号会丢失该对话，与"copy=保留源"矛盾。
 
-## 本轮修复补进来的坑（2026-09-21）
+## 已知坑位与应对（2026-09-21）
 
 | 现象 | 根因 | 处理 |
 |:---|:---|:---|
@@ -553,8 +698,15 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 | cwd 为空时正文落到 `projects/` 根目录 | `if not dst_dir` 恒为 False，slug 为空直接拼到根目录 | 三级 slug 回退 + 退化即中止 |
 | 列表大小统计偏小 | `--list` 路径仍用 `f.stat().st_size` | 改用递归 `path_size()` |
 | 跨库插入裸抛 sqlite 异常 | 顶层只捕获 `RuntimeError` | 增加 `sqlite3.Error` 分支给出回滚指引 |
-| 进程检测失败被当成"没在跑" | `except: pass` 吞掉异常 | `find_running_clients()` 返回 `(found, trustworthy)`，不可信时要求 `--force` |
+| 进程检测失败被当成"没在跑" | `except: pass` 吞掉异常 | `find_running_clients()` 返回 `(found, trustworthy)`，不可信时要求 `--force` 或更温和的 `--assume-clients-closed`（后者不绕过"真检测到客户端"） |
 | 正文 id 改写误伤用户文本 | 整行 `replace(old_sid, new_sid)` | 只替换 `"sessionId":"<old>"` 字段值（实测正文里 2/3 的出现是消息文本） |
+| 中途失败后回滚漏项 | `meta.json` 只在最后写一次，中途失败时磁盘上的 meta 缺 `override_deleted` / `source_deleted` / `copied_to`，精确回滚靠这些字段判断 → 静默跳过 | 每个破坏性步骤后 `_write_meta()` 增量落盘 |
+| 目标目录名与客户端不一致 | 用 `cwd_to_slug()` 自己推 slug（折叠连续 `-`、盘符小写），未必等于客户端真实建出的目录名 | 优先复用**源侧真实目录名**，`cwd_to_slug()` 只兜底 |
+| 覆盖时"行还在、正文没了" | 文件删除发生在 `commit()` 之前，commit 失败则 DB 回滚而文件已删 | 先 commit，成功后再删文件 |
+| 回滚后 WAL 被重放 | 只 `copy2` 主库，残留 `-wal`/`-shm` 与新主库不匹配，SQLite 打开时会重放 | 恢复前 `_remove_db_sidecars()` 清掉边车文件 |
+| `--intl` 拿到国内版 uid | `_set_workbuddy_dir()` 里 `STORAGE_JSON` 走平台路径，与版本无关；优先级 storage.json 在先 | 国际版目录不读平台 storage.json（`_storage_json_for()`），一律走 account-snapshot |
+| mcp.json 合并不生效 | 用"顶层 key 有无新增"判断，而 mcp.json 顶层只有 `mcpServers` → 目标一旦已有就整体 skip | 先 `deep_merge_dict` 再比较合并前后 JSON 是否变化 |
+| 脚本把自己当客户端 | 仓库目录名含 `workbuddy`，`ps -eo args=` 会命中脚本自身命令行 → 无条件拦截 | `_is_self_process()` 排除自身 pid 与含脚本路径的命令行 |
 | **workspaces 表没有 UNIQUE 约束** | `INSERT OR IGNORE` 拦不住重复导入，同一 path 会插两行 | 先 `DELETE FROM workspaces WHERE path = ?` 再 INSERT（2026-10-06 测试实测） |
 | **jsonl 每条消息顶层带 cwd 字段** | 跨设备不改写 → 客户端继续对话仍指向源机路径 | 流式改写顶层 `"cwd"` 字段值（json 解码转义后比对，兼容 `\uXXXX`）；消息文本里出现的路径一律不动 |
 | **回滚还原 DB 前不清 WAL** | 陈旧 `-wal/-shm` 会在新连接上重放，把刚还原的快照又盖回导入后状态 | 还原前先删 `workbuddy.db-wal` / `-shm` 再做 sqlite backup API 还原 |
@@ -565,7 +717,7 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 
 ```bash
 python3 tests/prepare_fixture.py    # 在临时目录构造 fixture（只读复制真实数据子集）
-python3 tests/run_tests.py          # 86 项：端到端 + migrate.py 单元级用例
+python3 tests/run_tests.py          # 端到端 + 单元级用例（数量随本机 fixture 浮动，看末尾「结果」行）
 ```
 
 新增用例覆盖：跨账号 copy 保留源、软冲突覆盖后 usage 回滚、cwd 为空不落根目录、

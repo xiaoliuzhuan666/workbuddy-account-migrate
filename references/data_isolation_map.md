@@ -4,6 +4,13 @@
 
 ### 核心存储目录
 
+> **两个版本**：国内版用 `~/.workbuddy/`，国际版用 `~/.workbuddy-ai/`，
+> **目录结构与隔离方式完全相同**（下面统一以国内版路径举例）。
+> 唯一实质差异是登录态来源：两个版本都写 `storage/skeleton/account-snapshot.json`，
+> 国内版额外有平台 `storage.json` 可兜底；**国际版目录一律不要读平台 `storage.json`**
+> ——它是国内版的登录态文件，读了会把国内版 uid 当成国际版当前账号
+> （表现为"迁移成功但对话全部消失"）。见 `_storage_json_for()`。
+
 ```
 ~/.workbuddy/
 ├── workbuddy.db                  # SQLite 主数据库
@@ -56,10 +63,16 @@
 ```
 C:\Users\alice\WorkBuddy\2026-09-10-14-49-02
   → c-Users-alice-WorkBuddy-2026-09-10-14-49-02
+\\server\share\proj
+  → unc-server-share-proj        （UNC 网络盘，加 unc- 前缀以免与本地目录混淆）
 ```
 
-盘符转小写、去掉 `:`、`\` 和 `/` 转 `-`，空格保留。
-跨版本迁移时优先用 `glob("*/{session_id}*")` 反查，不要硬算。
+盘符转小写、去掉 `:`、`\` 和 `/` 转 `-`、连续 `-` 折叠成一个，空格保留。
+
+⚠️ **不要硬算**：`cwd_to_slug()` 只是我们自己推的规则，未必等于客户端真实建出的目录名。
+跨版本迁移时**优先沿用源侧真实存在的目录名**（`projects/<slug>/` 的 `slug`），
+`cwd_to_slug()` 仅作兜底；目录名与客户端不一致会导致正文落到客户端不扫描的目录
+（表现为"迁移成功但对话打不开"）。定位时用 `glob("*/{session_id}*")` 反查。
 
 ### 当前登录 user_id 获取方式
 
@@ -87,7 +100,7 @@ cat ~/Library/Application\ Support/WorkBuddy/User/globalStorage/storage.json | \
 | sessions | user_id 字段 | UPDATE SQL | 🟡 中（改DB） |
 | memory | 文件名 | 追加合并 | 🟢 低（文本） |
 | connectors/mcp.json | 子目录 | JSON 深度合并 | 🟡 中（配置） |
-| connectors/states.json | 子目录 | JSON 深度合并 | 🟢 低 |
+| connectors/connector-states.json | 子目录 | JSON 深度合并 | 🟢 低 |
 | **tasks** | **按 session** | **TaskCreate 重建 / 文件复制** | **🟡 中（新版 UI 不读文件）** |
 | **projects/*.jsonl** | **按 session（非数据库）** | **跨版本必须复制文件** | **🔴 高（漏了对话就是空的）** |
 | **projects/{sid}/tool-results/** | **按 session（目录）** | **必须整目录复制** | **🔴 高（备份阶段若按文件处理会崩溃）** |

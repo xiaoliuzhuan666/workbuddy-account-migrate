@@ -193,7 +193,13 @@ def db_query(home: Path, sql, params=()):
 
 def slug_of(cwd: str) -> str:
     """镜像 cwd_to_slug 规则（测试保持独立实现，不 import 被测脚本）"""
-    s = cwd.replace("\\", "-").replace("/", "-")
+    s = str(cwd)
+    # 盘符：`C:\` → `c-`。cwd_to_slug 会把 `C:` 转成小写并去掉冒号，
+    # 漏掉这一步在 Windows 上会算出完全不同的 slug（macOS/Linux 无盘符，
+    # 恰好一致，所以这个偏差只在 Windows 上暴露为 3 项误报失败）。
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        s = s[0].lower() + s[2:]
+    s = s.replace("\\", "-").replace("/", "-")
     while "--" in s:
         s = s.replace("--", "-")
     return s.strip("-")

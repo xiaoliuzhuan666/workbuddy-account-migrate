@@ -299,7 +299,7 @@ def get_current_uid(ep: EditionPaths):
 
     优先级：account-snapshot.json 的 primary.uid（客户端真实登录态，v1.6.3 定下的权威来源）
     → DB 中 session 数最多的 user_id（兜底）。
-    不读平台 storage.json —— 它与客户端登录态可能长期不一致（2026-09-22 实战 6 连坑）。
+    不读平台 storage.json —— 它是国内版的登录态文件，与客户端真实登录态可能长期不一致。
     """
     try:
         if ep.account_snapshot.exists():
@@ -1019,7 +1019,7 @@ def _import_inner(args, ep: EditionPaths, tar, manifest, members, pkg) -> int:
 
     # 客户端必须关闭（写操作）
     if not require_clients_closed(force=args.force):
-        return 1
+        return 2
 
     # 交互模式：写入前最后确认（这就是小白的 dry-run 替代品，计划已在上面展示）
     if is_interactive() and not getattr(args, "yes", False):
@@ -1279,7 +1279,7 @@ def do_rollback(tag: str, args) -> int:
         return 1
 
     if not require_clients_closed(force=args.force):
-        return 1
+        return 2
 
     print(f"回滚目标：{tag}")
     print(f"  导入路径：{meta.get('new_cwd')}")
