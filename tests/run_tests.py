@@ -265,10 +265,15 @@ def pick_test_session(home) -> tuple:
 
 
 def session_with_tool_results(home):
-    """找出一条正文里带 tool-results 目录的对话（没有则返回 None）"""
+    """找出一条正文里带**非空**目录的对话（没有则返回 None）
+
+    只判断「目录存在」不够：真实 projects/ 里存在空的 tool-results/ 目录，
+    命中它会让 [13] 拿空文件列表去比对（`bool(sf)` 为 False），在数据稀疏的
+    机器上表现为误报失败。这里要求目录内至少有一个文件，否则继续往后找。
+    """
     p = home / ".workbuddy" / "projects"
     for f in sorted(p.glob("*/*")):
-        if f.is_dir():
+        if f.is_dir() and any(x.is_file() for x in f.rglob("*")):
             return f.name
     return None
 
@@ -528,22 +533,32 @@ def main():
 
     # ---------- 13. 正文含目录（tool-results） ----------
     print("\n[13] 正文含目录（tool-results）时完整复制")
-    # 用例对话不一定带 tool-results，单独找一条带目录的来测
+    # 用例对话不一定带 tool-results，单独找一条带目录的来测。
+    # 这里同样要求目录非空：只有空目录时无从比对文件清单，应跳过而不是判失败。
     tsid = session_with_tool_results(home)
-    src_dirs = [f for f in project_files(home, "domestic", tsid) if f.is_dir()] if tsid else []
+    src_dirs = ([f for f in project_files(home, "domestic", tsid)
+                 if f.is_dir() and any(x.is_file() for x in f.rglob("*"))]
+                if tsid else [])
     if not src_dirs:
-        print("  ⏭️  当前 fixture 没有 tool-results 目录，跳过")
+        print("  ⏭️  当前 fixture 没有非空的 tool-results 目录，跳过")
     else:
         _remove_from_intl(home, tsid)   # 先清干净，避免硬冲突降级为 skip
         r = run(["--from", "domestic", "--to", "intl", "--session-id", tsid,
                  "--mode", "copy", "--yes", "--force"], home)
         check("含目录的正文可迁移", r.returncode == 0, r.stderr[-400:])
-        dst_dirs = [f for f in project_files(home, "intl", tsid) if f.is_dir()]
+        # 与源侧保持同一套过滤条件：迁移走 copytree，空目录也会被复制，
+        # 若这里不过滤「非空」，目标侧可能比源侧多出空目录，数量比对就会误判
+        dst_dirs = [f for f in project_files(home, "intl", tsid)
+                    if f.is_dir() and any(x.is_file() for x in f.rglob("*"))]
         check("目标侧目录已复制", len(dst_dirs) == len(src_dirs),
               f"src={len(src_dirs)} dst={len(dst_dirs)}")
         if dst_dirs:
-            sf = sorted(p.name for p in src_dirs[0].rglob("*") if p.is_file())
-            df = sorted(p.name for p in dst_dirs[0].rglob("*") if p.is_file())
+            # 用相对路径比对：只比文件名的话，文件从 tool-results/ 跑到
+            # 另一个子目录、但文件名没变时会被误判为「齐全」
+            sf = sorted(str(p.relative_to(src_dirs[0]))
+                        for p in src_dirs[0].rglob("*") if p.is_file())
+            df = sorted(str(p.relative_to(dst_dirs[0]))
+                        for p in dst_dirs[0].rglob("*") if p.is_file())
             check("目录内文件齐全", bool(sf) and sf == df, f"{sf} vs {df}")
 
     # ---------- 14. 跨账号 + copy：源必须保留 ----------
