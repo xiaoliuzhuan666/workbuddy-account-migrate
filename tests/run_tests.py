@@ -25,6 +25,7 @@ import io
 import json
 import os
 import platform
+import shutil
 import re
 import sqlite3
 import subprocess
@@ -61,6 +62,7 @@ import prepare_fixture  # noqa: E402
 
 PY = sys.executable
 PASS, FAIL = [], []
+_CLEANED = False   # _finish 成功清理后置真，atexit 不再重复删
 
 # 测试 helper 打开的 sqlite 连接统一登记，进程退出时兜底关闭。
 # 以前每个 helper 都是 `c = sqlite3.connect(...)` + 末尾 `c.close()`，中间任何
@@ -117,6 +119,34 @@ def run(args, env_home, stdin=None):
         encoding="utf-8", errors="replace",
         input=stdin, timeout=180,
     )
+
+
+def _block_writes(path: Path):
+    """制造「写入目标必然失败」，返回解锁回调
+
+    只读位已经不能用了 —— 产品复制前会先抹掉只读位（修只读位传染后的正确行为）。
+    Windows 用独占句柄（share=0）；POSIX 用「目标不存在 + 父目录不可写」。
+    """
+    if platform.system() == "Windows":
+        path.write_bytes(b"0" * 16)
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        h = k32.CreateFileW(str(path), 0x80000000 | 0x40000000, 0, None, 3, 0, None)
+        invalid = ctypes.c_void_p(-1).value
+        if h and h != invalid:
+            return lambda: k32.CloseHandle(ctypes.c_void_p(h))
+        return lambda: None
+    # ⚠️ 仅对非 root 有效：root 会绕过权限位，该用例在 root 容器里会假失败。
+    # 本套件声明只保证 Windows 实测（那里走 CreateFileW 分支）。
+    path.unlink(missing_ok=True)
+    parent = path.parent
+    try:
+        orig_mode = parent.stat().st_mode
+    except OSError:
+        orig_mode = 0o755
+    os.chmod(str(parent), 0o555)
+    return lambda: os.chmod(str(parent), orig_mode)
 
 
 def check(name, cond, detail=""):
@@ -299,18 +329,21 @@ def main():
     if not (home / ".workbuddy-ai" / "workbuddy.db").exists():
         print()
         print("⏭️  跳过端到端测试：本机没有国际版数据（~/.workbuddy-ai/workbuddy.db）。")
-        print("   本套用例全部是「国内版 ⇄ 国际版」跨版本场景，fixture 只能造出国内版一半。")
-        print("   这不是脚本缺陷，属于环境限制。要跑全量请先在另一版本里创建过对话。")
-        return 0
+        print("   本套 e2e 全是「国内版 ⇄ 国际版」跨版本场景，fixture 只能造出国内版一半。")
+        print("   这不是脚本缺陷，属于环境限制。先跑不依赖跨版本数据的单元用例。")
+        # 以前这里直接 return 0，把注释自称「不依赖 fixture 数据」的 unit_tests
+        # 也一起跳过了 —— 只装国内版的环境会拿到一个「全绿」的假结果。
+        unit_tests(home)
+        return _finish(home)
 
     print(f"\nfixture: {home}\n")
     # ⚠️ 用例编号 = 执行序（打印出来就是 [1] [2] … 依次递增）。
     # 历史上多次被破坏，成因都一样：
     # 编号与「文件里的先后」对不上，读源码的人按文件顺序核对就得出错误结论。
-    # 现在两者**刻意做成一致**：main() 里只留 [1]~[21] 的内联用例，[22]~[27]
+    # 现在两者**刻意做成一致**：main() 里只留 [1]~[21] 的内联用例，[22]~[28]
     # 全是函数，且**定义顺序 = 调用顺序**（unit_tests → migrate_py_e2e →
     # cli_entrypoints_e2e → task_restore_e2e → _case_full_copy_keeps_source →
-    # _case_full_requires_rollback）。
+    # _case_full_requires_rollback → backup_variants_e2e）。
     # 加用例时：新的一段写成函数放在对应位置，取「它在执行序列里的下一个号」。
     # 改完用 `python tests/run_tests.py | grep '^\['` 核对是否严格递增。
     # 跑完（含中途异常）自动清理：fixture 里是真实对话正文与记忆，长期留在系统
@@ -322,6 +355,9 @@ def main():
         # 里面是真实对话正文与记忆的副本。所以合成一个：先关连接，再删目录。
         def _cleanup_all():
             _close_open_conns()
+            # 失败时保留现场（_finish 已打印路径）；成功时 _finish 已经删过
+            if FAIL or _CLEANED or os.environ.get("WB_KEEP_FIXTURE"):
+                return
             prepare_fixture.clean()
 
         atexit.register(_cleanup_all)
@@ -354,7 +390,7 @@ def main():
     # ---------- 3. move 迁移 ----------
     print("\n[3] move 模式跨版本迁移")
     r = run(["--from", "domestic", "--to", "intl", "--session-id", sid,
-             "--mode", "move", "--yes", "--force"], home)
+             "--mode", "move", "--yes", "--force", "--on-conflict", "overwrite"], home)
     check("move 迁移成功", r.returncode == 0, r.stderr[-500:])
 
     row = db_rows(home, "intl", sid)
@@ -367,7 +403,10 @@ def main():
     check("源文件已删除", len(project_files(home, "domestic", sid)) == 0)
     check("目标正文文件已复制", len(project_files(home, "intl", sid)) >= 1,
           f"{len(project_files(home, 'intl', sid))} 个")
-    check("目标 session 数 +1", db_rows(home, "intl") == dst_before + 1)
+    # 目标库里若本来就有同标题对话，显式 overwrite 会先删它再写入，
+    # 净变化是 0 而不是 +1；用「不少于迁移前」覆盖两种情形
+    check("目标 session 数未减少", db_rows(home, "intl") >= dst_before,
+          f"{db_rows(home, 'intl')} vs {dst_before}")
 
     tag = _last_backup_tag(home)
     check("已创建备份", tag is not None)
@@ -386,7 +425,7 @@ def main():
     # ---------- 5. copy 模式 ----------
     print("\n[5] copy 模式保留源")
     r = run(["--from", "domestic", "--to", "intl", "--session-id", sid,
-             "--mode", "copy", "--yes", "--force"], home)
+             "--mode", "copy", "--yes", "--force", "--on-conflict", "overwrite"], home)
     check("copy 迁移成功", r.returncode == 0, r.stderr[-500:])
     check("copy 后源仍保留", db_rows(home, "domestic", sid) is not None)
     check("copy 后源 session 数不变", db_rows(home, "domestic") == src_before)
@@ -553,13 +592,18 @@ def main():
         check("目标侧目录已复制", len(dst_dirs) == len(src_dirs),
               f"src={len(src_dirs)} dst={len(dst_dirs)}")
         if dst_dirs:
-            # 用相对路径比对：只比文件名的话，文件从 tool-results/ 跑到
-            # 另一个子目录、但文件名没变时会被误判为「齐全」
-            sf = sorted(str(p.relative_to(src_dirs[0]))
-                        for p in src_dirs[0].rglob("*") if p.is_file())
-            df = sorted(str(p.relative_to(dst_dirs[0]))
-                        for p in dst_dirs[0].rglob("*") if p.is_file())
-            check("目录内文件齐全", bool(sf) and sf == df, f"{sf} vs {df}")
+            # 按「目录名 → 文件相对路径清单」逐目录比对：
+            # 只比排序后第一个目录的话，数量相等而内容错位时仍会误判通过。
+            def _dir_map(dirs):
+                # 键用 "slug/name"：同一 sid 可能在多个 slug 下都有目录，
+                # 只用 d.name 会塌缩成最后一个，比对退化成"只看一个目录"
+                return {f"{d.parent.name}/{d.name}": sorted(
+                    str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
+                    for d in dirs}
+
+            smap, dmap = _dir_map(src_dirs), _dir_map(dst_dirs)
+            check("每个非空目录的文件清单一致", bool(smap) and smap == dmap,
+                  f"{smap} vs {dmap}")
 
     # ---------- 14. 跨账号 + copy：源必须保留 ----------
     print("\n[14] 跨账号 + --mode copy：源对话必须保留（不能退化成归属转移）")
@@ -645,14 +689,18 @@ def main():
         files_only = [p for p in ordered if not p.is_dir()]
         victim = files_only[-1] if files_only else None
         ro = d / (victim.name if victim else f"{fsid}.jsonl")
-        ro.write_text("占位，制造复制失败", encoding="utf-8")
-        os.chmod(str(ro), 0o444)   # 只读 → 复制正文必然失败
         prior = [p for p in ordered if p.name != ro.name]
         before_src_rows = db_rows(home, "domestic", fsid)
+        # 必须在 _block_writes() 创建占位文件【之前】取快照，否则 pre_dst 会把它算进去
         pre_dst = {p.name for p in project_files(home, "intl", fsid)}
+        # 目标写入必然失败：只读位已不能制造失败（产品会先抹掉只读位再写）
+        unlock = _block_writes(ro)
         r = run(["--from", "domestic", "--to", "intl", "--session-id", fsid,
                  "--mode", "move", "--yes", "--force"], home)
         check("正文复制失败时迁移中止", r.returncode != 0, r.stdout[-300:])
+        # 迁移进程已退出，立刻释放独占句柄：否则回滚删这个文件也会失败
+        # （现在的回滚会如实报告"没删掉"并返回非零，正是预期行为）
+        unlock()
         tag = _last_backup_tag(home, "intl")
         if tag:
             mp = _backup_root(home, "intl") / tag / "meta.json"
@@ -665,12 +713,12 @@ def main():
                 check("失败前已复制的文件已登记进 meta",
                       '"copied_to":[]' not in compact, mt[:300])
             rr = run(["--rollback", tag, "--yes", "--force"], home)
-            check("失败后可用备份回滚", rr.returncode == 0, rr.stderr[-300:])
+            check("失败后可用备份回滚", rr.returncode == 0,
+                  f"rc={rr.returncode} out={(rr.stdout + rr.stderr)[-800:]}")
             check("回滚后源对话仍在", db_rows(home, "domestic", fsid) == before_src_rows)
             left = {p.name for p in project_files(home, "intl", fsid)}
             check("回滚后目标侧没有孤儿正文", left == pre_dst,
                   f"left={left} expect={pre_dst}")
-        os.chmod(str(ro), 0o644)
         _rm(ro)
         _remove_from_intl(home, fsid)
 
@@ -769,13 +817,37 @@ def main():
     # ---------- 27. --full 必须配 --rollback ----------
     _case_full_requires_rollback(home)
 
+    # ---------- 28. 旧格式 / 缺件 / 损坏备份的完整 CLI 回滚 ----------
+    backup_variants_e2e(home)
+
     # ---------- 汇总 ----------
+    return _finish(home)
+
+
+def _finish(home=None):
     print("\n" + "=" * 70)
     print(f"结果: 通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:")
         for f in FAIL:
             print(f"  - {f}")
+        if home:
+            # 失败时保留 fixture 便于排查
+            print(f"fixture 保留在：{home}")
+    elif home and not os.environ.get("WB_KEEP_FIXTURE"):
+        # 成功时清掉：里面是真实对话正文的副本，不该长期躺在 %TEMP%
+        # WB_KEEP_FIXTURE=1 时保留（调试要看现场）
+        global _CLEANED
+        # Windows 上必须先关 sqlite 句柄再删目录，否则 rmtree 会 WinError 145；
+        # 且只有真的删掉了才能置 _CLEANED（否则 atexit 会跳过带重试的 clean）
+        _close_open_conns()
+        shutil.rmtree(str(home), ignore_errors=True)
+        if not home.exists():
+            _CLEANED = True
+        else:
+            print(f"  ⚠️  fixture 未能删除，请手动清理：{home}")
+    elif home:
+        print(f"fixture 按 WB_KEEP_FIXTURE 保留在：{home}")
     print("=" * 70)
     return 1 if FAIL else 0
 
@@ -987,6 +1059,260 @@ def unit_tests(home):
         sys.stderr.flush()
         import migrate  # type: ignore[import-not-found]  # scripts/ 已加入 sys.path
         import migrate_session as ms  # type: ignore[import-not-found]
+
+        # [22.1] 跨 slug 同名正文 fail-fast：三组标签共用同一判据
+        _dup = tmp / "dupslug"
+        (_dup / "slugA").mkdir(parents=True, exist_ok=True)
+        (_dup / "slugB").mkdir(parents=True, exist_ok=True)
+        _fa = _dup / "slugA" / "s.jsonl"; _fa.write_text("A", encoding="utf-8")
+        _fb = _dup / "slugB" / "s.jsonl"; _fb.write_text("B", encoding="utf-8")
+        for _label in ("源侧正文", "目标侧原有正文", "被覆盖的目标旧对话正文"):
+            try:
+                ms._reject_duplicate_names(_dup / "bp", [_fa, _fb], _label)
+                check(f"{_label}：同名正文应中止", False)
+            except RuntimeError as _e:
+                _m = str(_e)
+                # 稳定契约：抛 RuntimeError + 两条完整路径都在消息里；
+                # 具体措辞留给实现，免得润色文案就把测试打红
+                check(f"{_label}：同名正文中止且列出两条完整路径",
+                      str(_fa) in _m and str(_fb) in _m, _m[:200])
+        try:
+            ms._reject_duplicate_names(_dup / "bp", [_fa], "源侧正文")
+            check("单文件不触发 fail-fast", True)
+        except RuntimeError as _e:
+            check("单文件不触发 fail-fast", False, str(_e)[:120])
+
+        # [22.3] 备份缺件检查：full 与 precise 两条回滚共用同一函数
+        _bp = tmp / "bpcheck"
+        (_bp / "dst_files" / "slugX").mkdir(parents=True, exist_ok=True)
+        (_bp / "dst_files" / "slugX" / "s.jsonl").write_text("x", encoding="utf-8")
+        _pr = []
+        ms._check_backup_files_present(_bp, {"dst_files": [{"rel": "slugX/s.jsonl"}]}, _pr)
+        check("备份齐全时不记账", not _pr, str(_pr))
+        _pr2 = []
+        ms._check_backup_files_present(
+            _bp, {"dst_files": [{"rel": "slugX/missing.jsonl"}]}, _pr2)
+        check("备份缺件时记账", any("备份缺少" in x for x in _pr2), str(_pr2))
+        # 旧平铺备份（meta 里只有 name、没有 rel）不能误报
+        (_bp / "files").mkdir(parents=True, exist_ok=True)
+        (_bp / "files" / "old.jsonl").write_text("x", encoding="utf-8")
+        _pr3 = []
+        ms._check_backup_files_present(_bp, {"src_files": [{"name": "old.jsonl"}]}, _pr3)
+        check("旧平铺备份不误报", not _pr3, str(_pr3))
+        # meta 值为 null 不能崩（本轮刚补的容错）
+        _pr4 = []
+        ms._check_backup_files_present(_bp, {"dst_files": None}, _pr4)
+        check("meta 值为 null 不崩", not _pr4, str(_pr4))
+
+        # [22.4] 旧平铺备份：读取路径必须回退到 name（rel 缺失）
+        _bp2 = tmp / "bpflat"
+        (_bp2 / "files").mkdir(parents=True, exist_ok=True)
+        (_bp2 / "files" / "old.jsonl").write_text("OLD", encoding="utf-8")
+        _fm = {"name": "old.jsonl", "path": str(tmp / "restored.jsonl")}
+        _src2 = ms._backup_file_path(_bp2, "files", _fm)
+        check("旧平铺备份：读取路径回退到 name",
+              _src2.exists() and _src2.read_text(encoding="utf-8") == "OLD", str(_src2))
+        # 新布局优先用 rel
+        (_bp2 / "files" / "slugA").mkdir(parents=True, exist_ok=True)
+        (_bp2 / "files" / "slugA" / "old.jsonl").write_text("NEW", encoding="utf-8")
+        _fm2 = {"name": "old.jsonl", "rel": "slugA/old.jsonl"}
+        _src3 = ms._backup_file_path(_bp2, "files", _fm2)
+        check("新布局：读取路径用 rel",
+              _src3.read_text(encoding="utf-8") == "NEW", str(_src3))
+
+        # [24.1] helper 边界：空条目 / 越界 rel 绝不能退化成「组目录」。
+        # 组目录 .exists() 为真，会走进 safe_copy → 先删 f["path"] 再 copytree，
+        # 这是第二十四轮复核实测出来的破坏性回归。
+        _bp3 = tmp / "bpsafe"
+        (_bp3 / "files").mkdir(parents=True, exist_ok=True)
+        check("空 meta 条目不返回组目录",
+              ms._backup_file_path(_bp3, "files", {}) is None)
+        check("只有 path 的条目不返回组目录",
+              ms._backup_file_path(_bp3, "files", {"path": "/x"}) is None)
+        for _bad in ("/etc/passwd", "C:/abs/x", "../outside", "a/../b", "", "\\\\srv\\share"):
+            check("越界 rel 被拒绝：" + repr(_bad),
+                  ms._backup_file_path(_bp3, "files", {"rel": _bad}) is None)
+        check("非 dict 条目被拒绝",
+              ms._backup_file_path(_bp3, "files", "junk") is None)
+        _good = ms._backup_file_path(_bp3, "files", {"name": "a.jsonl"})
+        check("正常条目指向组内文件而非组目录",
+              _good is not None and _good.name == "a.jsonl" and _good != _bp3 / "files",
+              str(_good))
+        # 缺件检查对非法条目不能静默跳过，且不能与还原循环重复记两笔
+        _pr5 = []
+        ms._check_backup_files_present(_bp3, {"dst_files": [{"path": "/x"}]}, _pr5)
+        check("非法条目：缺件检查不再静默跳过", bool(_pr5), str(_pr5))
+        _dup = ms._backup_entry_invalid_msg({"path": "/x"})
+        _pr6 = [_dup]
+        ms._check_backup_files_present(_bp3, {"dst_files": [{"path": "/x"}]}, _pr6)
+        check("非法条目不重复记账", len(_pr6) == 1, str(_pr6))
+
+        # [25.1] 同族变体：rel 解析出来是「目录」而不是文件。
+        # '.' / './' 退化成组目录，'slug' / 'slug/' 指向整个 slug 目录；
+        # 目录 exists() 为真 → safe_copy 先删 f["path"] 再 copytree，
+        # 且缺件检查看到目录存在不会记任何问题（静默）。
+        for _dirish in (".", "./", "slug/", "slug"):
+            check("目录型 rel 被拒绝：" + repr(_dirish),
+                  ms._backup_file_path(_bp3, "files",
+                                       {"rel": _dirish, "name": "x", "path": "/x"}) is None)
+        check("name 回退也不能是 '.'",
+              ms._backup_file_path(_bp3, "files", {"name": "."}) is None)
+        check("name 回退也不能带尾斜杠",
+              ms._backup_file_path(_bp3, "files", {"name": "slug/"}) is None)
+        # 目录必须真的存在：否则 helper 不拦时也会因「缺件」记账，断言会恒真
+        (_bp3 / "files" / "slug").mkdir(parents=True, exist_ok=True)
+        _pr7 = []
+        ms._check_backup_files_present(
+            _bp3, {"src_files": [{"rel": "slug", "name": "x", "path": "/x"}]}, _pr7)
+        check("目录型 rel：缺件检查不再静默", bool(_pr7), str(_pr7))
+        # 反例：合法 v3 文件与 is_dir=True 的 tool-results 目录条目不能被误伤
+        _ok_file = ms._backup_file_path(
+            _bp3, "files", {"rel": "slugA/a.jsonl", "name": "a.jsonl", "path": "/x"})
+        check("合法 v3 两段式 rel 不受影响",
+              _ok_file is not None and _ok_file == _bp3 / "files" / "slugA" / "a.jsonl",
+              str(_ok_file))
+        _ok_dir = ms._backup_file_path(
+            _bp3, "files", {"rel": "slugA/tool-results", "name": "tool-results",
+                            "is_dir": True, "path": "/x"})
+        check("合法 tool-results 目录条目不受影响",
+              _ok_dir is not None and _ok_dir == _bp3 / "files" / "slugA" / "tool-results",
+              str(_ok_dir))
+
+        # [25.2] 结构网：只调 helper 的单测保证不了 6 个还原循环都在用它。
+        # 三条断言分别钉住「调用点数量」「守卫数量」「内联表达式的位置」。
+        import ast as _ast
+        _src_txt = Path(ms.__file__).read_text(encoding="utf-8")
+        _tree = _ast.parse(_src_txt)
+        # 统计所有 Call（不只 Assign）：改成「直接作为实参传递」也照样计入
+        _calls = sum(1 for _nd in _ast.walk(_tree)
+                     if isinstance(_nd, _ast.Call)
+                     and isinstance(_nd.func, _ast.Name)
+                     and _nd.func.id == "_backup_file_path")
+        check("7 处读取点全部调用 _backup_file_path", _calls == 7, str(_calls))
+        # 7 = 6 个还原循环 + 缺件检查（检查函数里也用了同名 srcf）
+        _guards = sum(1 for _nd in _ast.walk(_tree)
+                      if isinstance(_nd, _ast.If)
+                      and isinstance(_nd.test, _ast.Compare)
+                      and isinstance(_nd.test.left, _ast.Name)
+                      and _nd.test.left.id == "srcf"
+                      and any(isinstance(_op, _ast.Is) for _op in _nd.test.ops)
+                      and any(isinstance(_c, _ast.Constant) and _c.value is None
+                              for _c in _nd.test.comparators))
+        _guards += sum(1 for _nd in _ast.walk(_tree)
+                       if isinstance(_nd, _ast.If)
+                       and isinstance(_nd.test, _ast.BoolOp)
+                       and isinstance(_nd.test.op, _ast.Or)
+                       and any(isinstance(_v, _ast.Compare)
+                               and isinstance(_v.left, _ast.Name)
+                               and _v.left.id == "srcf"
+                               and any(isinstance(_op, _ast.Is) for _op in _v.ops)
+                               and any(isinstance(_c, _ast.Constant) and _c.value is None
+                                       for _c in _v.comparators)
+                               for _v in _nd.test.values))
+        check("7 个读取点都有 srcf is None 守卫", _guards == 7, str(_guards))
+        # 内联表达式用 AST 定位：多空格 / 单引号 / 换变量名都抓得到，
+        # 唯一合法的一处是 helper 自己那行 `entry.get("rel") or entry.get("name")`。
+        _helper = next((_nd for _nd in _tree.body
+                        if isinstance(_nd, _ast.FunctionDef)
+                        and _nd.name == "_backup_file_path"), None)
+        _inline = []
+        for _nd in _ast.walk(_tree):
+            if (isinstance(_nd, _ast.BoolOp) and isinstance(_nd.op, _ast.Or)
+                    and any(isinstance(_v, _ast.Call)
+                            and isinstance(_v.func, _ast.Attribute)
+                            and _v.func.attr == "get" and _v.args
+                            and isinstance(_v.args[0], _ast.Constant)
+                            and _v.args[0].value == "rel"
+                            for _v in _nd.values)):
+                _inline.append(_nd.lineno)
+        _inside_helper = (_helper is not None
+                          and all(_helper.lineno <= _ln <= _helper.end_lineno
+                                  for _ln in _inline))
+        # 拆成两条：helper 若改写成 IfExp（没有 Or 节点），红的是下一条
+        # 「helper 内保留回退判据」，不会被误读成「内联表达式位置不对」。
+        check("内联 rel/name 回退只允许在 helper 内",
+              _helper is not None and _inside_helper, str(_inline))
+        check("helper 内确实保留 rel/name 回退判据",
+              bool(_inline) and _inside_helper,
+              "若 helper 改写了回退写法，请同步更新本断言与实际判据")
+
+        # [26.1] 写侧护栏：sanitizer 既不能误剔正常条目，也要挡住越界路径。
+        # roots 必须是「两个 edition 根 + 备份自身」——只给一个根会把跨版本
+        # 迁移的另一侧正文全部误剔（2026-11 首次启用失败的原因）。
+        _root_a = tmp / "edA"
+        _root_b = tmp / "edB"
+        _bpz = tmp / "backupz"
+        for _d in (_root_a, _root_b, _bpz):
+            _d.mkdir(parents=True, exist_ok=True)
+        _roots = (_root_a, _root_b, _bpz)
+        _good_src = str(_root_a / "projects" / "slugA" / "a.jsonl")
+        _good_dst = str(_root_b / "projects" / "slugB" / "b.jsonl")
+        _good_bp = str(_bpz / "files" / "a.jsonl")
+        _evil = str(tmp / "elsewhere" / "evil.jsonl")
+        _meta_ok = {
+            "src_files": [{"path": _good_src, "name": "a.jsonl"}],
+            "dst_files": [{"path": _good_dst, "name": "b.jsonl"}],
+            "override_files": [],
+            "copied_to": [_good_dst, _good_bp],
+        }
+        _prz = []
+        ms._sanitize_restore_paths(_meta_ok, _roots, _prz)
+        check("sanitizer：两个 edition 根 + 备份自身的正常条目全保留",
+              not _prz and len(_meta_ok["src_files"]) == 1
+              and len(_meta_ok["dst_files"]) == 1
+              and len(_meta_ok["copied_to"]) == 2,
+              str(_prz) + " " + str(_meta_ok))
+        _meta_bad = {
+            "src_files": [{"path": _evil, "name": "evil.jsonl"}],
+            "dst_files": None,
+            "override_files": [],
+            "copied_to": [_evil, _good_dst],
+        }
+        _prz2 = []
+        ms._sanitize_restore_paths(_meta_bad, _roots, _prz2)
+        check("sanitizer：越界还原路径被剔除并记账",
+              len(_meta_bad["src_files"]) == 0
+              and any("还原路径不在数据目录内" in x for x in _prz2), str(_prz2))
+        check("sanitizer：越界清理路径被剔除并记账",
+              _meta_bad["copied_to"] == [_good_dst]
+              and any("清理路径不在数据目录内" in x for x in _prz2),
+              str(_meta_bad["copied_to"]))
+        # 旧实现用字符串 startswith，<root>2 这种同前缀目录会被误放行
+        _sibling = str(_root_a) + "2"
+        _meta_pref = {"src_files": [{"path": str(Path(_sibling) / "evil.jsonl"),
+                                     "name": "x"}], "copied_to": []}
+        _prz3 = []
+        ms._sanitize_restore_paths(_meta_pref, _roots, _prz3)
+        check("sanitizer：同前缀目录不被误放行",
+              len(_meta_pref["src_files"]) == 0, str(_meta_pref["src_files"]))
+        # copied_to 里的脏值会在回滚的 Path(rel) 处 TypeError 崩在半途，同样要剔除
+        _meta_junk = {"copied_to": [None, 123, _evil, _good_dst]}
+        _prz4 = []
+        ms._sanitize_restore_paths(_meta_junk, _roots, _prz4)
+        check("sanitizer：非字符串 / 越界清理路径都剔除且记账",
+              _meta_junk["copied_to"] == [_good_dst]
+              and sum(1 for x in _prz4 if "已跳过" in x) == 3, str(_prz4))
+        # 结构断言：rollback 里必须真的调用了它，防止再次被注释掉却只留实现
+        _san_calls = [_nd for _nd in _ast.walk(_tree)
+                      if isinstance(_nd, _ast.Call)
+                      and isinstance(_nd.func, _ast.Name)
+                      and _nd.func.id == "_sanitize_restore_paths"]
+        check("rollback 已接回 _sanitize_restore_paths",
+              len(_san_calls) == 1, str(len(_san_calls)))
+        # 单测里的 roots 是测试自己传的，保证不了调用点也传对；钉住参数本身
+        _roots_txt = (_ast.unparse(_san_calls[0].args[1])
+                      if len(_san_calls) == 1 and len(_san_calls[0].args) > 1 else "")
+        check("sanitizer roots 含两个 edition 根与备份自身",
+              all(x in _roots_txt for x in ("src_ep.root", "dst_ep.root", "bp")),
+              _roots_txt)
+
+        # [22.2] usage 缺表判定：rollback 的三处 ℹ️ 分支依赖它
+        _uc = __import__("sqlite3").connect(str(tmp / "usage.db"))
+        _uc.execute("CREATE TABLE sessions (id TEXT)"); _uc.commit()
+        check("缺表时 _has_usage_table=False", ms._has_usage_table(_uc) is False)
+        _uc.execute("CREATE TABLE session_usage (session_id TEXT)"); _uc.commit()
+        check("有表时 _has_usage_table=True", ms._has_usage_table(_uc) is True)
+        _uc.close()
 
         # ⚠️ 进程内一律禁止「向用户提问」。
         # require_clients_closed() 在真检测到客户端时会用 input() 问一次，判据是
@@ -1373,7 +1699,9 @@ def unit_tests(home):
             (wmem / f"{uid}_memory.md").write_text(dup, encoding="utf-8")
         migrate._set_workbuddy_dir(wroot)
         try:
-            assert str(migrate.DB_PATH).startswith(str(wroot)), migrate.DB_PATH
+            # _set_workbuddy_dir() 会 resolve()（--dir 传相对路径时 as_uri() 才不会抛），
+            # 而 wroot 可能还是 8.3 短路径（USER~1），直接比字符串会假失败
+            assert migrate.DB_PATH.resolve() == (wroot / "workbuddy.db").resolve(), migrate.DB_PATH
             all_uids = sorted(migrate.get_all_user_ids())
             check("向导用例：三个账号都被扫到", len(all_uids) == 3, str(all_uids))
             # ⚠️ input 平时是 builtins 的名字、不是 migrate 的模块属性：
@@ -1919,7 +2247,9 @@ def task_restore_e2e(home):
     # 造"当前 session"：置 working + 极大 created_at，保证被稳定选中
     _set_status(home, "domestic", cur_sid, "working", created_at=9999999999999)
 
-    r = run_mig(["--restore-tasks", "--session", sid, "--yes"])
+    # --restore-tasks 只读库 + 写 tasks/，守卫已放宽为「只告警」；
+    # 这里保留 --force 仅为兼容旧用例（守卫不再拦这条路径）
+    r = run_mig(["--restore-tasks", "--session", sid, "--yes", "--force"])
     check("--restore-tasks 可执行", r.returncode == 0, r.stderr[-400:])
     check("任务恢复流程跑完", "任务恢复完成" in r.stdout, r.stdout[-400:])
     m = re.search(r"当前 session: (\S+)", r.stdout)
@@ -1986,6 +2316,118 @@ def _case_full_requires_rollback(home):
           "--full" in r.stdout and "--rollback" in r.stdout, r.stdout[-200:])
 
 
+
+
+def backup_variants_e2e(home):
+    """[28] 旧格式 / 缺件 / 损坏备份：三条完整 CLI 回滚
+
+    长期挂账的两条 e2e 合并成同一套 fixture：复制一份正常备份，分别改造成
+    「v2 平铺」「缺一个正文文件」「dst_session.json 损坏」，各跑一次真实
+    `--rollback`，覆盖读取回退、缺件记账、usage 孤儿三条分支。
+    每个变体用独立的 home 副本，避免三次回滚互相污染主 fixture 的状态。
+    """
+    print("\n[28] 旧格式 / 缺件 / 损坏备份：三条完整 CLI 回滚")
+
+    def _mk_flat(bp):
+        """把 v3 的 {slug}/{name} 备份改造成 v2 平铺，并去掉 meta 里的 rel"""
+        mp = bp / "meta.json"
+        meta = json.loads(mp.read_text(encoding="utf-8"))
+        for key, group in (("src_files", "files"), ("dst_files", "dst_files"),
+                           ("override_files", "override_files")):
+            for f in (meta.get(key) or []):
+                rel = f.pop("rel", None)
+                if not rel:
+                    continue
+                src, dst = bp / group / rel, bp / group / f["name"]
+                if src.exists() and src != dst:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(src, dst)
+        meta["version"] = 2
+        mp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return bool(meta.get("src_files"))
+
+    def _mk_missing(bp):
+        meta = json.loads((bp / "meta.json").read_text(encoding="utf-8"))
+        for f in (meta.get("src_files") or []):
+            p = bp / "files" / (f.get("rel") or f["name"])
+            if p.is_file():
+                p.unlink()
+                return True
+        return False
+
+    def _mk_broken(bp):
+        mp = bp / "meta.json"
+        meta = json.loads(mp.read_text(encoding="utf-8"))
+        meta["target_existed"] = True
+        (bp / "dst_session.json").write_text("{ 不是 JSON", encoding="utf-8")
+        mp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
+    variants = (
+        ("旧平铺备份", "flat", _mk_flat),
+        ("缺件备份", "missing", _mk_missing),
+        ("损坏目标行备份", "broken", _mk_broken),
+    )
+    _close_open_conns()   # 复制前让 WAL 落盘，副本里的库才完整
+    _leftovers = []
+    for _label, _suffix, _mutate in variants:
+        _vroot = Path(tempfile.mkdtemp(prefix="wb-bkvar-"))
+        _vh = _vroot / "home"
+        try:
+            shutil.copytree(home, _vh)
+            _vsid, _ = pick_test_session(_vh)
+            _r = run(["--from", "domestic", "--to", "intl", "--session-id", _vsid,
+                      "--mode", "move", "--yes", "--force",
+                      "--on-conflict", "overwrite"], _vh)
+            if _r.returncode != 0:
+                check(f"{_label}：迁移准备成功", False,
+                      (_r.stdout + _r.stderr)[-300:])
+                continue
+            _tag = _last_backup_tag(_vh, "intl")
+            if not _tag:
+                check(f"{_label}：备份已创建", False, "")
+                continue
+            _bp0 = _backup_root(_vh, "intl") / _tag
+            _bp = _backup_root(_vh, "intl") / (_tag + "_" + _suffix)
+            shutil.copytree(_bp0, _bp)
+            if not _mutate(_bp):
+                check(f"{_label}：变体构造成功", False, "")
+                continue
+            _usage_before = False
+            if _suffix == "broken":
+                _ensure_usage(_vh, "intl", _vsid)
+                _usage_before = _usage_exists(_vh, "intl", _vsid)
+                # _ensure_usage 写库失败时只告警；若不钉住前置条件，
+                # 后面的「usage 行仍在」会退化成恒真断言
+                check("损坏目标行：构造前置——回滚前 usage 行存在", _usage_before)
+            _rr = run(["--rollback", _bp.name, "--yes", "--force"], _vh)
+            _out = _rr.stdout + _rr.stderr
+            if _suffix == "flat":
+                check("旧平铺备份：完整 CLI 回滚成功", _rr.returncode == 0, _out[-500:])
+                check("旧平铺备份：源侧正文已还原",
+                      len(project_files(_vh, "domestic", _vsid)) >= 1,
+                      f"files={len(project_files(_vh, 'domestic', _vsid))}")
+                check("旧平铺备份：没有误报缺件", "备份缺少" not in _out, _out[-300:])
+            elif _suffix == "missing":
+                check("缺件备份：回滚如实报「备份缺少」", "备份缺少" in _out, _out[-400:])
+                check("缺件备份：回滚退出码非 0", _rr.returncode != 0,
+                      f"rc={_rr.returncode}")
+            else:
+                check("损坏目标行：usage 未删造成孤儿（有输出）",
+                      "未删除（避免孤儿）" in _out, _out[-500:])
+                check("损坏目标行：usage 行仍在",
+                      _usage_before and _usage_exists(_vh, "intl", _vsid),
+                      f"before={_usage_before}")
+        finally:
+            _close_open_conns()
+            shutil.rmtree(_vroot, ignore_errors=True)
+            if _vroot.exists():
+                # 副本里是真实对话正文与记忆，静默残留等于持续泄漏个人数据
+                _leftovers.append(str(_vroot))
+    check("三个变体的临时 home 副本均已清理", not _leftovers, str(_leftovers))
 
 
 if __name__ == "__main__":
