@@ -55,7 +55,6 @@ if platform.system() == "Windows":
 
 import shutil
 import sqlite3
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -98,11 +97,13 @@ def _home_override() -> str:
 def _home() -> Path:
     """home 目录，支持环境变量覆盖（测试时指向临时 fixture，不碰真实数据）"""
     env = _home_override()
-    return Path(env) if env else Path.home()
+    return Path(env).expanduser().resolve() if env else Path.home().resolve()
 
 
 # user_id 形如 12345678-1234-1234-1234-123456789abc（8-4-4-4-12 十六进制）。
 # 只凭"目录名里有连字符"判断会把 projects-backup 之类普通目录当成账号。
+_DB_UNREADABLE_WARNED = False   # 同一轮 --diagnose 只提示一次
+
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -115,8 +116,12 @@ def _find_workbuddy_dir():
     """自动探测数据目录：国际版用 ~/.workbuddy-ai，国内版用 ~/.workbuddy"""
     ai_dir = _home() / ".workbuddy-ai"
     # 目录存在且非空即视为国际版（不依赖 DB 是否已生成）
-    if ai_dir.is_dir() and any(ai_dir.iterdir()):
-        return ai_dir
+    try:
+        if ai_dir.is_dir() and any(ai_dir.iterdir()):
+            return ai_dir
+    except OSError:
+        # 目录存在但读不了（权限/占用）时不能崩在 import 期，退回国内版路径
+        pass
     return _home() / ".workbuddy"
 
 
@@ -205,7 +210,9 @@ def _set_workbuddy_dir(path):
     """设置数据目录并重算所有派生路径（供 --dir / --intl 调用）"""
     global WORKBUDDY_DIR, DB_PATH, MEMORY_DIR, CONNECTORS_DIR, TASKS_DIR
     global STORAGE_JSON, ACCOUNT_SNAPSHOT, BACKUP_DIR
-    WORKBUDDY_DIR = Path(path).expanduser()
+    # resolve()：--dir ./data 这类相对路径若原样保留，后面 Path.as_uri() 会抛
+    # ValueError("relative path")，在线备份与只读校验都会静默降级
+    WORKBUDDY_DIR = Path(path).expanduser().resolve()
     DB_PATH = WORKBUDDY_DIR / "workbuddy.db"
     MEMORY_DIR = WORKBUDDY_DIR / "memory"
     CONNECTORS_DIR = WORKBUDDY_DIR / "connectors"
@@ -252,7 +259,7 @@ def get_client_login_nickname():
     """account-snapshot.json 里的昵称，仅用于把 uid 打印成人能看懂的样子"""
     if ACCOUNT_SNAPSHOT.exists():
         try:
-            with open(STORAGE_JSON, encoding="utf-8") as f:
+            with open(ACCOUNT_SNAPSHOT, encoding="utf-8") as f:
                 data = json.load(f)
             return ((data.get("primary") or {}).get("nickname") or "")
         except Exception:
@@ -306,7 +313,7 @@ def get_db_top_uid():
         return ""
     conn = None
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute(
             "SELECT user_id, COUNT(*) as cnt FROM sessions "
@@ -365,22 +372,69 @@ def get_current_user_id(verbose=True):
     return ""
 
 
+# uid 来源标签：内部标签 → 用户可见说明。
+# 两个脚本共用这一份，避免各抄一张表后漂移（migrate_session 以前引用了一个
+# 根本不存在的 uid_source_label，导致永远打印「未找到 migrate.py」）。
+UID_SRC_ACCOUNT_SNAPSHOT = "account-snapshot"
+UID_SRC_STORAGE_JSON = "storage.json"
+UID_SRC_DB_MAJORITY = "db-majority"
+UID_SRC_UNKNOWN = "unknown"
+
+_UID_SRC_LABELS = {
+    UID_SRC_ACCOUNT_SNAPSHOT: "客户端登录态（account-snapshot.json）",
+    UID_SRC_STORAGE_JSON: "平台记录（storage.json，仅国内版兜底）",
+    UID_SRC_DB_MAJORITY: "数据库推断（session 数最多，最不可靠）",
+    UID_SRC_UNKNOWN: "未知",
+}
+
+
+def uid_source_label(how: str) -> str:
+    """uid 来源标签的用户可见说明"""
+    return _UID_SRC_LABELS.get(how, f"未知来源（{how}）")
+
+
+def resolve_current_uid():
+    """推断当前登录 uid，**连来源一起返回** → (uid, how)
+
+    与 `get_current_user_id()` 同一套优先级，区别只是把来源带出来：调用方需要据此
+    判断「这个 uid 是不是猜的」—— `db-majority` 必须强告警（典型机器上会话最多的
+    恰恰是旧账号，拿它当目标 = 迁移后对话消失）。
+    """
+    client_uid = get_client_login_uid()
+    if client_uid:
+        return client_uid, UID_SRC_ACCOUNT_SNAPSHOT
+    storage_uid = get_storage_json_uid()
+    if storage_uid:
+        return storage_uid, UID_SRC_STORAGE_JSON
+    db_uid = get_db_top_uid()
+    if db_uid:
+        return db_uid, UID_SRC_DB_MAJORITY
+    return "", UID_SRC_UNKNOWN
+
+
 def get_all_user_ids():
     """扫描所有已知的 user_id"""
     user_ids = set()
 
     # 从 DB
     if DB_PATH.exists():
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = None
         try:
+            conn = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
             cur = conn.cursor()
             cur.execute("SELECT DISTINCT user_id FROM sessions WHERE user_id IS NOT NULL")
             for row in cur.fetchall():
                 user_ids.add(row[0])
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            # 「库读不到」与「库里没有账号」是两件事，否则 --diagnose 会打印
+            # 「0 个账号」，比报错更误导。两个调用点各调一次，用模块级标记去重。
+            global _DB_UNREADABLE_WARNED
+            if not _DB_UNREADABLE_WARNED:
+                print(f"  ⚠️  无法读取数据库（诊断结果可能不完整）：{e}")
+                _DB_UNREADABLE_WARNED = True
         finally:
-            conn.close()   # 异常时也要关，否则连接泄漏
+            if conn is not None:
+                conn.close()   # 异常时也要关，否则连接泄漏
 
     # 从 memory 文件（同样只认 UUID 形态，或已在 DB 里出现过的 uid）
     if MEMORY_DIR.exists():
@@ -404,16 +458,23 @@ def get_session_counts():
     """获取各 user_id 的 session 数量"""
     counts = {}
     if DB_PATH.exists():
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = None
         try:
+            conn = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
             cur = conn.cursor()
             cur.execute("SELECT user_id, COUNT(*) FROM sessions WHERE user_id IS NOT NULL GROUP BY user_id")
             for row in cur.fetchall():
                 counts[row[0]] = row[1]
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            # 「库读不到」与「库里没有账号」是两件事，否则 --diagnose 会打印
+            # 「0 个账号」，比报错更误导。两个调用点各调一次，用模块级标记去重。
+            global _DB_UNREADABLE_WARNED
+            if not _DB_UNREADABLE_WARNED:
+                print(f"  ⚠️  无法读取数据库（诊断结果可能不完整）：{e}")
+                _DB_UNREADABLE_WARNED = True
         finally:
-            conn.close()   # 异常时也要关，否则连接泄漏
+            if conn is not None:
+                conn.close()   # 异常时也要关，否则连接泄漏
     return counts
 
 
@@ -468,6 +529,8 @@ def get_connector_info():
 
 
 def diagnose():
+    global _DB_UNREADABLE_WARNED
+    _DB_UNREADABLE_WARNED = False   # 每次诊断重新允许提示（进程内多次调用时不能永久静默）
     """诊断模式：展示所有账号数据分布"""
     client_uid = get_client_login_uid()
     storage_uid = get_storage_json_uid()
@@ -556,7 +619,12 @@ def _ask_yes_no(prompt: str) -> bool:
 PROC_KEYWORDS = ("workbuddy", "codebuddy")
 
 # 本工具自身的脚本名（用于把自己从"正在运行的客户端"里排除掉）
-_SELF_SCRIPT_NAMES = ("migrate.py", "migrate_session.py", "run_tests.py", "prepare_fixture.py")
+_SELF_SCRIPT_NAMES = ("migrate.py", "migrate_session.py", "migrate_project.py",
+                      "run_tests.py", "run_project_tests.py", "prepare_fixture.py")
+
+# 用户取消标记：取消点只 print 就 return，main() 无法区分「取消」与「成功」。
+# --restart 尤其不能在被取消之后还把客户端拉起来。
+_STATE = {"cancelled": False}
 
 
 def _is_self_process(pid: str, cmdline: str) -> bool:
@@ -764,7 +832,10 @@ def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8"):
     """
     tmp = Path(str(path) + ".tmp")
     try:
-        with open(tmp, "w", encoding=encoding) as f:
+        # surrogateescape：Memory / jsonl 里可能有非 UTF-8 字节，strict 会抛
+        # UnicodeDecodeError，replace 会把它们变成 U+FFFD 再写回磁盘（不可逆篡改）。
+        # surrogateescape 能原样往返，写回的就是原字节。
+        with open(tmp, "w", encoding=encoding, errors="surrogateescape") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -918,6 +989,10 @@ def _copy_tree(src: Path, dst: Path) -> bool:
 def _copy_file(src: Path, dst: Path) -> bool:
     """复制单个文件并补齐写权限（`copy2` 会把只读位一起带过去）"""
     try:
+        if dst.exists():
+            # 覆盖只读目标前先补写权限：copy2 写只读文件会 PermissionError
+            # （回滚恢复 Memory / 覆盖已有备份时正好会撞上）
+            _ensure_writable(dst)
         shutil.copy2(str(src), str(dst))
         _ensure_writable(dst)
         return True
@@ -941,7 +1016,9 @@ def _create_backup_inner(backup_path, backup_tag, target_uid, timestamp, source_
     # 备份 Memory
     mem_file = MEMORY_DIR / f"{target_uid}_memory.md"
     if mem_file.exists():
-        _copy_file(mem_file, backup_path / f"{target_uid}_memory.md")
+        if not _copy_file(mem_file, backup_path / f"{target_uid}_memory.md"):
+            # 备份是回滚的唯一依据：复制失败还继续迁移，等于把安全网剪了
+            raise RuntimeError(f"备份 Memory 失败：{mem_file}")
         print(f"  ✅ 已备份 Memory → {backup_path / f'{target_uid}_memory.md'}")
 
     # 备份 Connectors
@@ -950,7 +1027,8 @@ def _create_backup_inner(backup_path, backup_tag, target_uid, timestamp, source_
         dst_dir = backup_path / target_uid
         if dst_dir.exists():
             shutil.rmtree(str(dst_dir))
-        _copy_tree(conn_dir, dst_dir)
+        if not _copy_tree(conn_dir, dst_dir):
+            raise RuntimeError(f"备份 Connectors 失败：{conn_dir}")
         print(f"  ✅ 已备份 Connectors → {backup_path / target_uid}/")
 
     # 写入备份元数据
@@ -1006,6 +1084,12 @@ def _wal_checkpoint(cur, label="") -> bool:
 
 def migrate_sessions(source_uid, target_uid):
     """迁移 Session 历史"""
+    if not DB_PATH.exists():
+        # 没有库 = 没有会话。用户只配了连接器、客户端还没建过对话时就是这种状态，
+        # 必须返回 0 而不是抛错 —— 抛错会把后面的 Memory / Connector 迁移一起中止。
+        # 也不要 connect：那会凭空建出一个空 workbuddy.db 垃圾文件。
+        print(f"  ⏭️  数据库不存在（{DB_PATH.name}），视为无会话可迁")
+        return 0
     conn = sqlite3.connect(str(DB_PATH))
     try:
         return _migrate_sessions_inner(conn, source_uid, target_uid)
@@ -1060,6 +1144,10 @@ def _migrate_sessions_inner(conn, source_uid, target_uid):
             "（会话数据未改动）。请关闭两个版本的 WorkBuddy 客户端后重试"
         )
 
+    # 这里不做「目标账号下是否已有同 id 行」的预检：sessions.id 是 PRIMARY KEY，
+    # 同一行只能有一个 user_id，自连接 src.id = dst.id 永远只匹配同一行，
+    # 条件恒不成立（白跑一次全表 join）。UPDATE 只改 user_id、不动 id，
+    # 主键冲突在这套 schema 下也不可能发生。
     # 执行迁移
     cur.execute("UPDATE sessions SET user_id = ? WHERE user_id = ?", (target_uid, source_uid))
     migrated = cur.rowcount
@@ -1127,26 +1215,30 @@ def reset_cloud_mapping(source_uid, backup_dir=None):
 
             # 删除前整库备份（含 WAL/SHM）
             if backup_dir is not None:
-                if not backup_dir.exists():
-                    backup_dir.mkdir(exist_ok=True)
-                dst_dir = backup_dir / "edge-sync"
-                if not dst_dir.exists():
-                    dst_dir.mkdir(exist_ok=True)
-                for suffix in ("", "-wal", "-shm"):
-                    src = Path(str(db_file) + suffix)
-                    if src.exists():
-                        shutil.copy2(str(src), str(dst_dir / src.name))
+                try:
+                    dst_dir = backup_dir / "edge-sync"
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    for suffix in ("", "-wal", "-shm"):
+                        src = Path(str(db_file) + suffix)
+                        if src.exists():
+                            shutil.copy2(str(src), str(dst_dir / src.name))
+                except OSError as e:
+                    # 备份失败就不能删：映射删了却无法回滚，比不清理更糟
+                    print(f"  ⚠️  {db_file.name} 备份失败（{e}），跳过清理以免无法回滚")
+                    continue
 
             cur.execute("DELETE FROM edge_sync_mapping WHERE msg_channel = ?", (channel,))
             deleted = cur.rowcount
             conn.commit()
             cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.close()
             total_deleted += deleted
             touched += 1
             print(f"  🧹 {db_file.name}: 清掉 {deleted} 条指向旧账号云通道的映射")
-        except sqlite3.Error as e:
+        except (sqlite3.Error, OSError) as e:
+            # docstring 承诺「失败也只告警不中断」：文件被占用抛的是 PermissionError，
+            # 不是 sqlite3.Error，以前会直接冒到顶层（此时 sessions 已 commit）
             print(f"  ⚠️  {db_file.name} 处理失败（不影响本地数据，可忽略）：{e}")
+        finally:
             if conn is not None:
                 try:
                     conn.close()
@@ -1190,7 +1282,9 @@ def migrate_memory(source_uid, target_uid):
         print(f"  ⏭️  源账号无 Memory 文件，跳过")
         return
 
-    src_content = src_file.read_text(encoding="utf-8").strip()
+    # surrogateescape：Memory 里可能有非 UTF-8 字节，strict 会抛 UnicodeDecodeError
+    # 一路冒成 traceback；replace 又会把它们变成 U+FFFD 写回（不可逆篡改）
+    src_content = src_file.read_text(encoding="utf-8", errors="surrogateescape").strip()
 
     if not src_content:
         print(f"  ⏭️  源账号 Memory 为空，跳过")
@@ -1200,12 +1294,13 @@ def migrate_memory(source_uid, target_uid):
         # 目标不存在，直接复制（memory 目录本身也可能不存在）
         if not dst_file.parent.exists():
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-        dst_file.write_text(src_content, encoding="utf-8")
+        # 原子写：写到一半失败会留下半截 RAW_JSON 块，客户端下次解析直接异常
+        _atomic_write_text(dst_file, src_content)
         print(f"  ✅ 复制 Memory（目标为空，直接复制 {len(src_content)} 字符）")
         return
 
     # 目标已存在，追加去重
-    dst_content = dst_file.read_text(encoding="utf-8").strip()
+    dst_content = dst_file.read_text(encoding="utf-8", errors="surrogateescape").strip()
     src_blocks = _extract_memory_blocks(src_content)
     dst_blocks = _extract_memory_blocks(dst_content)
 
@@ -1494,6 +1589,7 @@ def migrate(source_uid, target_uid=None, skip_confirm=False, target_is_manual=Fa
         answer = _ask_yes_no("确认执行迁移？(y/N): ")
         if not answer:
             print("已取消")
+            _STATE["cancelled"] = True
             return
 
     # Phase 2: 备份
@@ -1640,9 +1736,10 @@ def rollback(backup_tag, skip_confirm=False):
     if (not backup_tag
             or "/" in backup_tag or "\\" in backup_tag
             or os.path.isabs(backup_tag)
+            or re.match(r"^[A-Za-z]:", backup_tag)   # Windows 盘符相对路径（C:xxx）
             or ".." in Path(backup_tag).parts):
         print(f"❌ 备份标签不合法：{backup_tag!r}")
-        print("   标签只能是备份目录名（如 20260921153000_12345678），不能包含路径分隔符")
+        print("   标签只能是备份目录名（如 20260921153000_12345678），不能包含路径分隔符或盘符")
         sys.exit(1)
 
     backup_path = BACKUP_DIR / backup_tag
@@ -1667,9 +1764,19 @@ def rollback(backup_tag, skip_confirm=False):
             # 用户看不到"该怎么办"。
             print(f"⚠️  备份 meta.json 无法解析（{e}）")
             meta = {}
+        if not isinstance(meta, dict):
+            # 合法 JSON 但顶层是 list/str/null：走「无 meta」既有分支，不裸抛 AttributeError
+            print(f"⚠️  备份 meta.json 顶层不是对象，按无 meta 处理：{meta_file}")
+            meta = {}
         if str(meta.get("kind", "")).startswith("session"):
             print("❌ 这是【单对话迁移】的备份，整账号回滚不适用：")
             print("   python3 scripts/migrate_session.py --rollback <TAG>")
+            sys.exit(1)
+        if meta.get("kind") == "project_import":
+            # v1.7.0 起跨设备导入的备份也放在 migrate_backups/ 根下，
+            # 不拦住的话会被当成整账号备份还原（字段语义完全不同）
+            print("❌ 这是【跨设备项目导入】的备份，整账号回滚不适用：")
+            print("   python3 scripts/migrate_project.py --rollback <TAG>")
             sys.exit(1)
         target_uid = meta.get("target_uid", "")
     else:
@@ -1707,7 +1814,9 @@ def rollback(backup_tag, skip_confirm=False):
         answer = "y" if _ask_yes_no("确认回滚？这将覆盖当前数据！(y/N): ") else "n"
     if answer != "y":
         print("已取消")
-        return
+        _STATE["cancelled"] = True
+        # 返回 False 让 main() 以非零退出：自动化脚本要能区分「用户取消」与「回滚成功」
+        return False
 
     # 恢复数据库。
     # ⚠️ 顺序很关键：只有确实要覆盖主库时才清理 -wal / -shm。以前无条件先删边车、
@@ -1754,7 +1863,10 @@ def rollback(backup_tag, skip_confirm=False):
             def _restore_mem():
                 if not MEMORY_DIR.exists():
                     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-                _copy_file(mem_backup, MEMORY_DIR / f"{target_uid}_memory.md")
+                # _copy_file 失败只返回 False（不抛），必须自己转成异常交给 _fs，
+                # 否则 _fs 恒成功、回滚照样打印「✅ 已恢复」
+                if not _copy_file(mem_backup, MEMORY_DIR / f"{target_uid}_memory.md"):
+                    raise OSError(f"复制 {mem_backup.name} 失败")
             if _fs("恢复 Memory", _restore_mem):
                 print("  ✅ 已恢复 Memory")
 
@@ -1764,9 +1876,20 @@ def rollback(backup_tag, skip_confirm=False):
         conn_target = CONNECTORS_DIR / target_uid
         if conn_backup.exists():
             def _restore_conn():
-                if conn_target.exists():
-                    shutil.rmtree(str(conn_target))
-                _copy_tree(conn_backup, conn_target)
+                # 先复制到临时目录、成功后再替换：直接 rmtree 再 copytree 的话，
+                # 复制失败会把目标目录删空却报成功（里面是 mcp.json / token）
+                tmp = conn_target.with_name(conn_target.name + ".rollback-tmp")
+                if tmp.exists():
+                    shutil.rmtree(str(tmp), ignore_errors=True)
+                try:
+                    if not _copy_tree(conn_backup, tmp):
+                        raise OSError(f"复制 {conn_backup.name} 失败")
+                    if conn_target.exists():
+                        shutil.rmtree(str(conn_target))
+                    os.replace(str(tmp), str(conn_target))
+                finally:
+                    if tmp.exists():
+                        shutil.rmtree(str(tmp), ignore_errors=True)
             if _fs("恢复 Connectors", _restore_conn):
                 print("  ✅ 已恢复 Connectors")
         else:
@@ -1786,31 +1909,57 @@ def rollback(backup_tag, skip_confirm=False):
                 if _fs("删除迁移新建的 Memory", lambda: leftover_mem.unlink()):
                     print("  ✅ 已删除迁移新建的 Memory（迁移前目标账号没有它）")
 
+    # 恢复 edge-sync 云端通道映射（迁移时清过，回滚要还原，否则映射永久丢失，
+    # 客户端会把所有对话当"未同步"重新上传一遍）
+    # ⚠️ 这一步与 fs_errors 无关：**正常成功的回滚也必须还原**。以前整段被误缩进
+    # 到 `if fs_errors:` 里，导致只有回滚本身出错时才还原，语义完全反了。
+    es_backup = backup_path / "edge-sync"
+    if es_backup.exists():
+        # 备份里没有对应边车时，目标侧残留的旧 -wal / -shm 会被重放，
+        # 把刚恢复的映射又盖回去（与数据库恢复同一道理）
+        for f in sorted(es_backup.iterdir()):
+            if not f.is_file() or f.name.endswith(("-wal", "-shm")):
+                continue
+            for suffix in ("-wal", "-shm"):
+                side = WORKBUDDY_DIR / (f.name + suffix)
+                if side.exists() and not (es_backup / (f.name + suffix)).exists():
+                    if not _fs(f"清理 {side.name}", lambda side=side: side.unlink()):
+                        # 陈旧 WAL 会在下次打开时重放，把刚还原的映射盖回去；
+                        # 与主库恢复「清不掉就中止」保持同一口径
+                        print(f"  ❌ 无法清理 {side.name}，继续覆盖等于白滚，已中止")
+                        sys.exit(1)
+        restored = 0
+        for f in sorted(es_backup.iterdir()):
+            if not f.is_file():
+                continue
+            # 用 _copy_file 而不是裸 copy2（只读目标要先补写权限），但注意：
+            # _copy_file 失败只返回 False、不抛异常，而 _fs 只看"有没有抛"——
+            # 直接把它塞进 _fs 会让失败恒成功（回滚打 ✅ 却什么都没恢复）。
+            def _restore_es(f=f):
+                if not _copy_file(f, WORKBUDDY_DIR / f.name):
+                    raise OSError(f"复制 {f.name} 失败")
+            if _fs(f"恢复 edge-sync 映射 {f.name}", _restore_es):
+                restored += 1
+        if restored:
+            print(f"  ✅ 已恢复 edge-sync 映射（{restored} 个文件）")
+    else:
+        print("  ⏭️  备份中没有 edge-sync 映射，跳过")
+
     if fs_errors:
         print(f"\n  ⚠️  有 {len(fs_errors)} 项没有恢复成功（最常见原因：客户端仍占用文件）：")
         for _e in fs_errors:
             print(f"     · {_e}")
         print("     关闭客户端后重跑同一条 --rollback 即可续做（已完成的部分是幂等的）")
 
-        # 恢复 edge-sync 云端通道映射（迁移时清过，回滚要还原，否则映射永久丢失，
-        # 客户端会把所有对话当"未同步"重新上传一遍）
-        es_backup = backup_path / "edge-sync"
-        if es_backup.exists():
-            restored = 0
-            for f in sorted(es_backup.iterdir()):
-                if f.is_file():
-                    shutil.copy2(str(f), str(WORKBUDDY_DIR / f.name))
-                    restored += 1
-            if restored:
-                print(f"  ✅ 已恢复 edge-sync 映射（{restored} 个文件）")
-        else:
-            print("  ⏭️  备份中没有 edge-sync 映射，跳过")
-
     print("\n  ⚠️  请重启 WorkBuddy 客户端让变更生效！")
+    if fs_errors:
+        # 回滚没做完就不能以 0 退出：自动化会把半回滚当成功
+        sys.exit(1)
+    return True
 
 
 def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
-                        keep_cloud_mapping=False):
+                        keep_cloud_mapping=False, restart=False):
     """交互式迁移向导：列出所有账号，用户分别选择源和目标
 
     skip_confirm：透传给 migrate() 的 --yes。以前命令行的 --yes 在这条路径上
@@ -1847,6 +1996,7 @@ def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
                     print("  请输入 1 或 2")
             except (EOFError, KeyboardInterrupt):
                 print("\n已取消")
+                _STATE["cancelled"] = True
                 return
 
     all_uids = get_all_user_ids()
@@ -1893,6 +2043,7 @@ def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
             choice = input("请选择【目标账号】（接收数据的账号，输入序号）: ").strip()
             if choice.lower() == "q":
                 print("已取消")
+                _STATE["cancelled"] = True
                 return
             idx = int(choice) - 1
             if 0 <= idx < len(all_uids):
@@ -1905,6 +2056,7 @@ def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
             print("⚠️  请输入数字或 q")
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
+            _STATE["cancelled"] = True
             return
 
     # 选源账号（排除目标）
@@ -1928,6 +2080,9 @@ def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
         try:
             migrate(source_uid, target_uid=target_uid, target_is_manual=True,
                     skip_confirm=skip_confirm, reset_mapping=not keep_cloud_mapping)
+            if restart and not _STATE["cancelled"]:
+                # 取消后不能重启：用户明确什么都没做，客户端却被拉起来
+                restart_client()
             return
         except SystemExit as e:
             # migrate() 用 sys.exit 表示中止：`3` = 无数据可迁（或合并后无新增），
@@ -1950,6 +2105,7 @@ def _pick_source_uid(other_uids, session_counts):
             choice = input("\n请选择【源账号】（要迁移出的账号，输入序号）: ").strip()
             if choice.lower() == "q":
                 print("已取消")
+                _STATE["cancelled"] = True
                 return None
             idx = int(choice) - 1
             if 0 <= idx < len(other_uids):
@@ -1959,6 +2115,7 @@ def _pick_source_uid(other_uids, session_counts):
             print("⚠️  请输入数字或 q")
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
+            _STATE["cancelled"] = True
             return None
 
 
@@ -1983,6 +2140,12 @@ def get_task_stats():
             try:
                 with open(task_file, encoding="utf-8") as f:
                     task_data = json.load(f)
+                if not isinstance(task_data, dict):
+                    # 顶层不是对象时，消费侧 t.get("status") 会 AttributeError ——
+                    # 一条坏文件就能把 --list-tasks / 任务恢复整体带崩
+                    broken += 1
+                    last_err = f"顶层不是对象（{type(task_data).__name__}）"
+                    continue
                 tasks.append(task_data)
             except Exception as e:
                 broken += 1
@@ -2000,7 +2163,9 @@ def get_session_title(session_id):
         return None
     conn = None
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        # 只读连接：--restore-tasks 放宽守卫后这条路会在客户端持库时执行，
+        # 读写打开可能在缺 -wal 时凭空建出 WAL/-shm
+        conn = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("SELECT title FROM sessions WHERE id = ?", (session_id,))
         row = cur.fetchone()
@@ -2067,7 +2232,13 @@ def _resolve_restore_session():
     sessions_dir = WORKBUDDY_DIR / "sessions"
     if sessions_dir.exists():
         fallback_id = None
-        for session_file in sorted(sessions_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+        try:
+            _session_files = sorted(sessions_dir.glob("*.json"),
+                                    key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            # 文件被并发删除 / 权限异常时 stat 会抛：退回不排序，别让整个诊断崩掉
+            _session_files = sorted(sessions_dir.glob("*.json"))
+        for session_file in _session_files:
             try:
                 with open(session_file, encoding="utf-8") as f:
                     session_data = json.load(f)
@@ -2090,7 +2261,7 @@ def _resolve_restore_session():
     if not current_session_id and DB_PATH.exists():
         conn = None
         try:
-            conn = sqlite3.connect(str(DB_PATH))
+            conn = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
             cur = conn.cursor()
             cur.execute("SELECT id FROM sessions WHERE status = 'working' ORDER BY created_at DESC LIMIT 1")
             row = cur.fetchone()
@@ -2226,6 +2397,7 @@ def restore_tasks(target_session_id=None, skip_confirm=False):
         answer = "y" if _ask_yes_no("\n确认恢复？(y/N): ") else "n"
         if answer != "y":
             print("已取消")
+            _STATE["cancelled"] = True
             return
 
     # 执行恢复：将任务写入当前 session 的 tasks 目录
@@ -2296,6 +2468,14 @@ def restore_tasks(target_session_id=None, skip_confirm=False):
         }
 
         task_file = current_tasks_dir / f"{next_id}.json"
+        # next_id 只在开头扫过一次；客户端可能在此期间新建了同编号任务，
+        # 直接 os.replace 会把用户的新任务覆盖掉。重新确认到第一个空位。
+        while task_file.exists():
+            next_id += 1
+            task_file = current_tasks_dir / f"{next_id}.json"
+        # 避让生效后 new_task["id"] 还是旧编号，客户端读的是 JSON 内的 id，
+        # 会与已被占用的那个任务重号
+        new_task["id"] = str(next_id)
         # 原子写：半截 JSON 下次会被 get_task_stats 静默跳过 = 这条任务直接丢失
         _atomic_write_text(
             task_file, json.dumps(new_task, indent=2, ensure_ascii=False)
@@ -2398,6 +2578,7 @@ def _run_migrate(args):
             skip_edition_prompt=args.intl or bool(args.dir),
             skip_confirm=args.yes,
             keep_cloud_mapping=args.keep_cloud_mapping,
+            restart=args.restart,
         )
 
 
@@ -2409,12 +2590,19 @@ def main():
     紧接着甩一整段 traceback，提示反而被淹没。与 migrate_session.py 的
     「三收口」对齐。
     """
-    # 必须最先执行：剥离 WorkBuddy 沙箱 shim（PYTHONPATH 劫持 mkdir 等 API）后重跑
-    _strip_sandbox_shim()
+    # 沙箱 shim 剥离放在 __main__（不是这里）：os.execv 会整体替换进程，
+    # 进程内调用 main() 的测试 / 复用方会被一起换掉。与 migrate_session.py 同口径。
     try:
         _main()
     except RuntimeError as e:
         print(f"\n❌ {e}")
+        sys.exit(1)
+    except OSError as e:
+        print(f"\n❌ 文件操作失败：{e}")
+        sys.exit(1)
+    except (AttributeError, TypeError) as e:
+        # 备份/meta 结构异常或工具自身编程错误都给人话，不甩 traceback
+        print(f"\n❌ 操作失败（{type(e).__name__}）：{e}")
         sys.exit(1)
     except sqlite3.Error as e:
         print(f"\n❌ 数据库写入失败：{e}")
@@ -2422,10 +2610,15 @@ def main():
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n已取消")
+        _STATE["cancelled"] = True
         sys.exit(130)
 
 
 def _main():
+    # 进程内重复调用 main() 时不能沿用上一次的取消标记
+    global _DB_UNREADABLE_WARNED
+    _DB_UNREADABLE_WARNED = False   # 每次进入主流程重置，别让上一次的静默跨调用残留
+    _STATE["cancelled"] = False
     parser = argparse.ArgumentParser(description="WorkBuddy 账号迁移工具")
     parser.add_argument("--dir", type=str, help="WorkBuddy 数据目录（默认自动探测：~/.workbuddy-ai 或 ~/.workbuddy）")
     parser.add_argument("--intl", action="store_true", help="强制使用国际版数据目录 ~/.workbuddy-ai（默认自动探测，--dir 优先级更高）")
@@ -2462,17 +2655,20 @@ def _main():
 
     # 互斥参数检查：--rollback 与其它动作参数同给时，以前会被静默丢掉
     if args.rollback and (args.source or args.target or args.restore_tasks
+                          or args.session or args.generate_commands
                           or args.list_tasks or args.diagnose):
-        print("❌ --rollback 不能与 --source / --target / --restore-tasks / --list-tasks 同时使用")
+        print("❌ --rollback 不能与 --source / --target / --restore-tasks / --list-tasks "
+              "/ --session / --generate-commands / --diagnose 同时使用")
         print("   请单独执行，例如：python3 migrate.py --rollback <TAG> --yes")
         sys.exit(1)
 
     # --diagnose 是只读诊断，和其它动作参数同给时那些参数会被静默丢掉
     # （以前只有 --rollback 有这条互斥检查，--diagnose --source X 直接不吭声）
     if args.diagnose and (args.source or args.target or args.restore_tasks
-                          or args.list_tasks):
+                          or args.list_tasks or args.session
+                          or args.generate_commands):
         print("❌ --diagnose 是只读诊断，不能与 --source / --target / "
-              "--restore-tasks / --list-tasks 同时使用")
+              "--restore-tasks / --list-tasks / --session / --generate-commands 同时使用")
         print("   请单独执行：python3 migrate.py --diagnose")
         sys.exit(1)
     # --list-tasks 是只读列出，同样会把动作参数吃掉（dispatch 是 elif 链，
@@ -2504,6 +2700,7 @@ def _main():
         # 至少要求一次显式确认，避免手滑把整个账号迁到不存在的 uid 下。
         if not args.yes and not _ask_yes_no("   确认继续？(y/N): "):
             print("已取消")
+            _STATE["cancelled"] = True
             sys.exit(1)
 
     # 客户端检测：migrate.py 同样会在客户端持锁 / WAL 未落盘时改库和覆盖文件，
@@ -2513,10 +2710,21 @@ def _main():
                                       assume_closed=args.assume_clients_closed):
             sys.exit(2)
 
+    # --restore-tasks 只读库（查标题/session id）+ 写 tasks/<sid>/*.json，不写库；而它的主用法就是
+    # 「在客户端会话里让 AI 恢复任务」—— 客户端必然开着，用写库那套守卫拦下来
+    # 等于把这个功能废掉。改为只告警。
+    if args.restore_tasks and not args.generate_commands:
+        running, _ = find_running_clients()
+        if running:
+            print(f"ℹ️  客户端正在运行（{', '.join(running)}）。任务恢复会写入 tasks/，"
+                  "完成后建议重启客户端让任务列表刷新。")
+
     if args.diagnose:
         diagnose()
     elif args.rollback:
-        rollback(args.rollback, skip_confirm=args.yes)
+        if not rollback(args.rollback, skip_confirm=args.yes):
+            # 用户取消：非零退出，自动化才能区分「取消」与「回滚成功」
+            sys.exit(1)
         if args.restart:
             restart_client()
     elif args.list_tasks:
@@ -2526,8 +2734,14 @@ def _main():
             generate_task_create_commands(target_session_id=args.session)
         else:
             restore_tasks(target_session_id=args.session, skip_confirm=args.yes)
+            if _STATE["cancelled"]:
+                sys.exit(1)
     elif args.source:
         _run_migrate(args)
+        if _STATE["cancelled"]:
+            # 取消后不能再去 restart_client()：用户明确什么都没做，
+            # 客户端却被拉起来，是最难解释的一种副作用
+            sys.exit(1)
         if args.restart:
             restart_client()
     else:
@@ -2538,8 +2752,13 @@ def _main():
         # --dir 已显式指定数据目录，再问版本会把 --dir 悄悄覆盖掉
         interactive_migrate(skip_edition_prompt=args.intl or bool(args.dir),
                             skip_confirm=args.yes,
-                            keep_cloud_mapping=args.keep_cloud_mapping)
+                            keep_cloud_mapping=args.keep_cloud_mapping,
+                            restart=args.restart)
+        if _STATE["cancelled"]:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
+    # 必须最先执行：剥离 WorkBuddy 沙箱 shim（PYTHONPATH 劫持 mkdir 等 API）后重跑
+    _strip_sandbox_shim()
     main()
