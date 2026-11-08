@@ -84,7 +84,7 @@ python3 scripts/migrate_session.py --rollback <TAG>
 | `0` | 成功 | 三个脚本 |
 | `1` | 参数错误 / 用户取消 / 业务性中止（备份失败、标签不合法、被占用等） | 三个脚本 |
 | `2` | 被「客户端仍在运行」守卫拦下（非终端，或终端里回答了否） | 三个脚本 |
-| `3` | **未做改动**：源账号没有数据，或源有数据但与目标完全重合、合并无新增 | **只有 `migrate.py`** |
+| `3` | **未做改动**：源账号没有数据，或源有数据但与目标完全重合、合并无新增；`migrate_project.py` 则是「没有需要导入的会话」 | `migrate.py` / `migrate_project.py` |
 
 `3` 不是新故障 —— v1.6.1 之前这情况返回 `0`，长期被当成"成功"。
 
@@ -107,9 +107,9 @@ python3 scripts/migrate_project.py --rollback <TAG>  # 导入回滚（整库快�
 **关键机制**：
 - import 自动探测目标机登录 uid（account-snapshot 权威），`user_id` / `cwd` / `workspaces.path` / `projects/{slug}/` 目录名 / **jsonl 每条消息顶层 `cwd` 字段** 全部重映射到目标机
 - slug 一律按**目标机新路径**重推导，不得沿用源 slug（沿用 = 客户端按 `projects/<slug>/<sid>.jsonl` 找不到，"迁移成功却打不开"）
-- 冲突语义：**同 id 覆盖**（同一个包反复导入不出双份——"两地交替"靠这个撑住）；同标题不同 id 默认跳过；无 TTY 降级跳过，`--on-conflict overwrite` 显式批量覆盖
+- 冲突语义：同 id 默认 `ask`（交互逐个询问），**无 TTY 降级跳过**；要「反复导入不出双份」须显式 `--on-conflict overwrite`。同标题不同 id 默认跳过，`overwrite` 时按「仍导入」处理（id 不同，不删本地那条）
 - 包内容：sessions/usage 行 + 正文 + tool-results + todos/tasks + `{项目}/.workbuddy/` 工作区记忆（可选）。**账号级 memory/connectors 不在范围**
-- 测试：`python3 tests/run_project_tests.py`（37 项合成 fixture，两台"虚拟机器"全链路，不依赖真实数据）
+- 测试：`python3 tests/run_project_tests.py`（45 项合成 fixture、两台"虚拟机器"全链路，不依赖真实数据；数量随环境浮动，以运行末尾「结果」行为准）
 
 ## 问题背景
 
@@ -544,7 +544,7 @@ mv ~/.workbuddy/storage/skeleton/account-snapshot.json \
 
 ```bash
 bash scripts/force-relogin.sh            # 国内版；--intl 国际版，--dir 指定目录
-bash scripts/force-relogin.sh --restore  # 回滚（把最近一个 .disabled-* 改回原名）
+bash scripts/force-relogin.sh --restore  # 回滚（当前登录态先另存为 .pre-restore-*）
 ```
 
 它做的事就是把 `storage/skeleton/account-snapshot.json` 移走，逼客户端弹登录。默认会检测客户端是否已退出，`--force` 可跳过。
@@ -596,11 +596,13 @@ bash scripts/force-relogin.sh --restore  # 回滚（把最近一个 .disabled-* 
 另外要检查命令的 `returncode`：命令失败但没抛异常时 stdout 为空，
 那样会把"检测失败"当成"客户端已关闭"。
 
-> **实现只有一份**：进程检测（`PROC_KEYWORDS` / `_is_self_process` / `_client_display_name` /
-> `find_running_clients` / `require_clients_closed`）全部在 `scripts/migrate.py` 里；
-> `scripts/migrate_session.py` 只做一层薄委托（`require_clients_closed` → `legacy.*`）。
-> 这样两个脚本不会再各自漂移，测试也只需打桩 `migrate.find_running_clients` 一处。
-> 改检测逻辑时改 `migrate.py` 即可，两边同时生效。
+> **实现现状（三处，待收口）**：完整实现（`PROC_KEYWORDS` / `_is_self_process` /
+> `_client_display_name` / `find_running_clients` / `require_clients_closed`）在
+> `scripts/migrate.py`；`scripts/migrate_session.py` 只做一层薄委托（`legacy.*`）；
+> `scripts/migrate_project.py` **仍自带一份独立实现**（有自排除与 returncode 检查，
+> 但档位与前者不完全一致，只支持 `--force` / `--assume-clients-closed` 两档中的同名语义）。
+> 改检测逻辑时三处都要看；后续计划抽成独立模块统一收口。
+> 测试打桩点：`migrate.find_running_clients`。
 
 原因（为什么必须关闭）：① 数据还在 WAL 没落盘；② 客户端退出时内存缓存会覆盖写入；③ 两个客户端同时持锁。
 
@@ -665,7 +667,7 @@ INSERT INTO sessions ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})
 | **双重包装 stdout 崩溃** | `migrate.py` 顶层已包装过 stdout，再包一层会导致第一个 wrapper 被 GC 时关闭共享 buffer | 复用前先判断 `encoding` 是否已为 utf-8 |
 | **无冲突时跳过确认** | `decision` 变量若初始化成 `"overwrite"`，无冲突时会被误判为"已确认覆盖"，直接执行 move 删源 | 初始值设为 `None`，只有真正走过冲突询问才跳过确认 |
 | **rollback 空 uid 灾难** | `backup_path / ""` 会退化成备份目录本身、`CONNECTORS_DIR / ""` 退化成整个 connectors 目录，`rmtree` 会删光所有账号配置 | 回滚前必须校验 `target_uid` 非空，否则跳过 |
-| **非交互模式默认覆盖** | `--yes` 时无法询问，若默认覆盖等于替用户做决定 | 无 TTY 一律降级 skip，需覆盖显式加 `--on-conflict overwrite` |
+| **非交互模式默认覆盖** | `--yes` 时无法询问，若默认覆盖等于替用户做决定 | `ask` 配 `--yes` 降级 skip；软冲突的 `overwrite` 必须配 `--yes` 才跳过确认（否则会删掉本机同标题对话） |
 | **正文不只是文件，还有目录** | `find_project_files()` 用 `glob("*/{sid}*")` 匹配，会命中与会话同名的 **`tool-results/` 目录**；对它 `shutil.copy2()` 在 Windows 上抛 `PermissionError: [Errno 13]`，备份阶段直接崩 | 文件与目录统一走 `copy_path()` / `remove_path()`；统计大小用递归 `path_size()` |
 | **目录大小被算成 0** | 目录 `stat().st_size` 不含内部文件，`tool-results/` 的贡献被漏掉 | 递归累加 `p.rglob("*")` |
 | **同版本 copy 空转** | `_migrate_intra` 只会改 `user_id`，源对话已属于当前账号时打印「无需迁移」就退出，用户想要的那份复制根本没发生 | uid 相同走克隆分支：新 id + 新标题 + 复制正文/任务 |
@@ -726,7 +728,164 @@ UUID 判定、Memory 重复迁移、fixture 下不读真实 storage.json、sqlit
 
 **严禁在真实数据目录上跑迁移测试**——fixture 用 `WORKBUDDY_MIGRATE_HOME` 环境变量指向临时目录，脚本内所有路径都从它派生。
 
+**新断言必须做一次「破坏性验证」**：把被测逻辑改坏（或临时禁用），确认断言真的会红。
+本项目踩过两次恒真断言——`home_d` 查了没回滚的那个 fixture、「判空目录」被「只含空子目录的
+`sid/`」骗过（它非空，所以 `not any(iterdir())` 恒假）。判据要盯「目标状态是否消失」，不是
+「某个集合是否为空」。
+
 ⚠️ **测试脚本仅 Windows 实测通过**（Windows 11 + Python 3.13）。fixture 复制的是本机真实数据，其中 session 的 cwd、projects 目录名都是 Windows 路径格式；macOS / Linux 未测试，本机未安装并登录 WorkBuddy 时造不出 fixture。
+
+## 已知取舍
+
+1. **`migrate()` 内部直接 `sys.exit(3)`**（"源账号无数据" / "合并后无新增"）。
+   向导的重试逻辑正是靠 `except SystemExit as e: if e.code != 3` 驱动（"换一个源账号再试"），
+   改成返回值要重构整段向导重试。若将来要返回值化，需同时改三处：
+   `interactive_migrate` 的 `except SystemExit` 判定、`_run_migrate` 的返回值传递、
+   `__main__` 的退出码映射。
+2. **进程检测有三份实现**（`migrate.py` 完整 / `migrate_session.py` 薄委托 /
+   `migrate_project.py` 独立一份带自排除）。计划后续抽独立模块统一收口，
+   改检测逻辑时三处都要看。
+3. **`migrate_project.py` 的沙箱 shim 剥离在模块级**（带 `_WB_PROJECT_MIGRATE_REEXEC`
+   重入保护），另两个脚本在 `__main__`。这也是它"被 import 时进程会被替换"的原因，
+   所以进程检测的自排除逻辑无法在测试进程内直接单测。
+4. **`tests/run_tests.py` 的 `[17]` 用独占句柄制造写入失败**：Windows 走
+   `CreateFileW(share=0)`，POSIX 走"父目录不可写"，后者在 root 容器里失效
+   （root 绕过权限位）——本套件只保证 Windows 实测。
+5. **软冲突命中多条同名对话时只处理一条**：不批量覆盖，避免误删用户改过标题的对话。
+6. **本地已软删除的同 id 会话仍算硬冲突**：默认 `ask` / 非交互降级 `skip`，不会因为
+   再导一次就自动复活 —— 语义上「用户删掉的东西不该被导入悄悄恢复」。
+   确实要复活请显式 `--on-conflict overwrite`。
+
+### 低危、已评估不修
+
+| 项 | 位置 | 理由 |
+|---|---|---|
+| `manifest["edition"]` 在 `--dir` 指向国际版目录时仍写 `domestic` | `do_export` | 元数据失真，当前无消费方 |
+| 导出侧三处小缺口：非交互提示措辞、`sel_cwd` 不存在时不提示、`writer.write()` 未包 try | `do_export` | 只影响提示或极端路径 |
+| `create_backup()` 后立刻读回 meta.json | `migrate_session` | 多一个崩溃点，但能及早发现坏 meta |
+| 正文复制阶段的 `mkdir`/原子写失败仍抛裸 `OSError` | `_migrate_cross` | 顶层已补 `except OSError` 收口 |
+| `migrate_session.py` 缺互斥校验（`--backups --rollback` 等） | 入口 | 行为可预测，未造成数据问题 |
+| `verbose=False` 仍打印回落分支；`--restart` 对 `--diagnose` 静默忽略 | `migrate.py` | 仅输出噪音 |
+| `session_usage` 覆盖未回填目标独有列 | 两脚本 | 与 sessions 同构，发生概率极低 |
+| **测试覆盖缺口（已知）**：`bad_rows` 退出码、包内重复 id、`next_id` 避让、BLOB 备份往返、`[null]` 畸形包仍无 e2e 用例（旧格式完整 CLI 回滚 / 缺件记账 / usage 孤儿已由 `[28]` 三条变体覆盖；读取回退、缺件检查、路径回退、helper 边界与结构断言另有单测） | `tests/` | 已登记，待补合成用例 |
+| 备份来自另一台机器 / 数据目录被搬走时，`meta` 里的绝对路径不在当前两个 edition 根内 | `migrate_session.rollback` | 写侧校验会把这些条目剔除并记账（不会静默）；跨机器搬运本就不支持精确回滚，请改用备份里的整库快照兜底 |
+| **接受的残留**：v2 平铺备份的 `name` 分支仍可指向 `files/<dir>`（单段名字无法区分文件与目录） | `_backup_file_path` | 不构成新越权面：能往备份目录里写目录的人本来就能替换正文，而工具本来就会把目录条目整体还原进数据目录。已评估并接受，**不是待修缺陷** |
+| 测试风格（空行/冗余 import/死参）、`pgrep`/`ls -1t` 健壮性、`{sid}.jsonl.tmp` 未登记 | `tests/`、`force-relogin.sh` | 不影响产品行为 |
+| `tests/run_project_tests.py` 的 `_client_running` 只匹配 `workbuddy`，产品 `PROC_KEYWORDS` 含 `codebuddy` → 只跑 CodeBuddy 的机器上守卫断言被跳过 | `tests/` | 测试侧覆盖缺口，非产品缺陷 |
+
+> 其中「`ask_conflict` 忽略 `--on-conflict`」已在 2026-11-03 修掉（显式策略优先），不再属于本表。
+
+### 已知的重复实现（改一处必须看另几处）
+
+- 进程检测：`migrate.py` 完整实现 / `migrate_session.py` 薄委托 / `migrate_project.py` 独立一份。
+- `resolve_current_uid()` vs `get_current_user_id()`：优先级链重复，输出措辞已分叉。
+- `snapshot_db()`：`migrate_project.py` 靠异常、`migrate_session.py` 返回 bool，契约不同。
+- `_same_db` 与 `_same_root_db`：`migrate_session.py --full` 里同一判据的两个名字/两次计算。
+- `_looks_like_uid()`：`migrate.py` 与 `migrate_project.py` 各一份（后者不 import 前者是既定约束）。
+- **`_safe_sid()` 只在 `migrate_project.py`**：`migrate_session.py` 的 rollback 里
+  `meta["session_id"]` 仍会拼进 `tasks_dir/sid` 与 `glob(f"*/{sid}*")` 且无形态校验。
+  威胁模型低（备份由本工具自写、非外人投递），但属有意不对称，已在此登记。
+
+### 已处理：同名正文跨 slug 压平
+
+`find_project_files()` 的 glob 跨所有 `projects/*/`。备份键原先用 `f.name`（basename），
+同一 sid 散落在两个 slug 下时两份同名文件会互相覆盖、回滚把同一份内容写回两个路径。
+现已改为 **`{slug}/{name}` 相对路径**：`meta` 的 `src_files` / `dst_files` / `override_files`
+各条记 `rel`，备份落盘到 `files|dst_files|override_files/<slug>/<name>`，回滚用
+`_backup_file_path()` 统一兼容旧备份（旧布局没有 `rel`，退回平铺读取 `name`）——
+6 个还原循环、缺件检查与单测共用这一个判据，不再各自内联表达式。
+同时保留三组 `_reject_duplicate_names()` 的 fail-fast——复制侧仍会把多 slug 写到同一目标目录，
+宁可明确拒绝也不静默压平。对应断言：三组标签各一条 + 单文件不误伤。
+
+### 回滚写侧路径校验：已重新设计并启用
+
+`_sanitize_restore_paths()` 校验 meta 里三组 `path` **与 `copied_to`** 是否落在允许的数据目录内，
+越界条目剔除并记账（备份被搬运或手改后，回滚不会往任意位置写/删）。
+
+首次实现曾因**误剔正常条目**被禁用，根因是 roots 只给了 edition 根：跨版本迁移时
+`path` 落在另一个 edition 根下；且 `Path.resolve()` 在 Windows 上对 8.3 短路径的展开不可靠。
+现在 roots 改为 **`src_ep.root` + `dst_ep.root` + 备份目录自身**，两侧统一 `resolve()` 并补一份
+`abspath` 形态兜底；包含关系用 `r in cand.parents` 而不是字符串 `startswith`
+（否则 `<root>2` 这类同前缀目录会被误放行）。启用后真实 fixture 全量回归通过，无误剔。
+
+单测覆盖「两个根 + 备份自身全保留 / 越界还原路径剔除 / 越界清理路径剔除 / 同前缀不误放行」，
+并加 2 条 AST 结构断言钉住「rollback 确实调用了它」与「roots 参数确实含三个根」
+——防止再次出现「实现还在、调用被注释掉」或「调用在但 roots 传少一个」。
+对应的回归用例覆盖三种形态：roots 少一个、包含判定改回字符串前缀、调用被移除。
+
+### 已加固：读侧路径护栏
+
+写侧由上面的 `_sanitize_restore_paths()` 管 `path` / `copied_to`；
+**读进来的 `rel`** 是另一回事，已在 `_backup_file_path()` 里收紧：
+
+- 条目既无 `rel` 也无 `name` → 返回 `None`，调用方跳过并记账。**不能**返回 `bp / group`：
+  那是组目录，`.exists()` 为真会走进 `safe_copy`，把整个组目录覆盖到 `f["path"]`
+  （先删目标再 `copytree`）——这类回归会直接删掉目标路径，必须拦住。
+- `rel` 为绝对路径、带盘符、`\0` 或含 `..` → 同样返回 `None`，防止 meta 被手改后越出备份目录。
+- **同族变体：`rel` 解析出来是目录**（`.` / `./` / `slug/` / 单段 `slug`）→ 返回 `None`。
+  同类变体：`.`/`./` 仍退化成组目录，`slug` 指向整个 slug 目录；
+  而且缺件检查看到目录存在不会报「缺件」，所以比空 rel 更静默。
+  判据是**形状**而非 I/O：v3 的 `rel` 由 `f.relative_to(projects_dir).as_posix()` 生成，
+  必然是规范化的多段路径；v2 的 `name` 必然是单段文件名。
+  `is_dir=True` 的合法目录条目（`slug/sid`、tool-results）本就要整体还原，**不受影响**。
+- 6 个还原循环各自有 `None` 守卫；`_check_backup_files_present()` 是第 7 个读取点，
+  与循环共用同一条文案并去重，非法条目不会静默跳过、也不会被记两遍。
+- `tests/run_tests.py` 除边界用例外，还有 **4 条 AST 结构断言**：
+  所有 `Call` 节点里 `_backup_file_path` 恰好 7 处（不只统计赋值）、
+  7 个读取点都有 `srcf is None` 守卫、内联 `get("rel") or ...` 表达式只允许出现在 helper 内
+  （多空格 / 单引号 / 换变量名都抓得到）、helper 内确实保留 rel/name 回退判据。
+  写侧另有 2 条（见上）。全部做过破坏性验证。
+
+### 已优化：大包导入的两层 O(n²)
+
+`do_import` 以前每个会话都把全部包内成员扫一遍（O(会话数 × 成员数)），
+且 `tar.extractfile(m)` 按成员名字字典序访问会让 gzip 流反复回退 seek
+（向后 seek 需要从头解压）。现在 `group_package_members()` 一次遍历按 sid 分组、
+组内按 `offset_data` 排序；`plan_in_tar_order()` 再按「会话首个成员的偏移」排序，
+使全局读取顺序单调 → gzip 单趟解压。workspace 合并 / 技能复制同样改按 offset 遍历。
+
+就分组 / 排序本身而言，只改变处理顺序与索引方式：用分组子列表算出的
+`created_files` 与全量扫描逐项一致（有 2 条断言钉住）。分组 key 按 `.` / `/`
+边界逐级注册前缀，因此含点的 session id（如 `abc.def`）不会被漏收。
+
+`tests/run_project_tests.py` 有 8 条断言：分组归位 ×2、offset 单调、plan 顺序、
+`created_files` 语义一致 ×2、含点 sid 分组与语义 ×2。
+反向验证覆盖三种形态：去掉组内排序、plan 不排序、sid 提取漏掉 `.meta.json` 拆分；
+最后一种还会连带让真实导入的正文 / meta.json 落盘断言变红。
+
+### 已修复：`--backup-dir` 在同版本路径被丢弃
+
+`_migrate_intra` / `_clone_intra` 现在接收并透传 `backup_root`，同版本迁移的备份也落在
+`<该目录>/session/`，与 README 一致。
+
+### 备份与工具版本应配套
+
+`{slug}/{name}` 备份布局从本版开始；**用旧版本工具回滚新版本产生的备份时，旧版只认平铺路径
+`files/<name>`，会找不到文件并静默跳过正文还原**（库行会回来，正文不会）。回滚请使用同一或更新版本。
+旧版产生的平铺备份仍可被本版回滚（读取侧由 `_backup_file_path()` 统一回退到 `name`）。
+
+### 语义决策：多 slug 同名正文为什么永久拒绝
+
+目标端只认 `dst_slug`（新 cwd 对应的那一个 `projects/<slug>/`）。同一会话的正文若在源端散落在
+两个 slug 下，复制到目标端只能落到同一个目录 —— 两份同名正文**本质无法共存**；
+「选客户端在用的那一份」也无从判断（客户端读的是 cwd，不是 slug 列表）。
+
+因此 `_reject_duplicate_names()` 的 fail-fast **永久保留**，不是过渡措施：
+删掉它只会把「明确拒绝」变回「静默压平 + 回滚串数据」。
+若要真正支持，必须改变语义（例如新增目录并在 meta 里记录映射），属于产品决策。
+**此项已决策完毕、不再列为待办**：三处调用点与「同名中止 / 单文件不误伤」断言保持原样即可。
+
+### 历史遗留项：测试覆盖缺口与设计决策的处理结果
+
+| 项 | 终局处理 |
+|---|---|
+| 旧格式备份完整 CLI 回滚 / usage 孤儿 e2e | `[28]` 三条变体（v2 平铺 / 缺件 / 损坏 `dst_session.json`）各跑一次真实 `--rollback`，7 条断言；每个变体用独立 home 副本，互不污染 |
+| `_sanitize_restore_paths` roots 重设 | 已按「两个 edition 根 + 备份自身 + 统一 resolve」重新设计并启用（见上）；真实 fixture 回归无误剔 |
+| 导入大包 O(n²) | 已按 sid 分组 + `offset_data` 排序优化（见上），项目套件 53/0 |
+| 多 slug 语义 | 已决策：fail-fast 永久保留（见上） |
+
+低危表登记的都是已评估并接受的取舍，不属于待修缺陷。
+两套测试：`run_tests.py` **280/0**、`run_project_tests.py` **53/0**。
 
 ## 参考文件
 
