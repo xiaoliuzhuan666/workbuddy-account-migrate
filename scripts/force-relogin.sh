@@ -15,7 +15,7 @@
 #   scripts/force-relogin.sh --intl         # 国际版（~/.workbuddy-ai）
 #   scripts/force-relogin.sh --dir /path    # 显式指定数据目录
 #   scripts/force-relogin.sh --force        # 跳过「客户端已退出」检测
-#   scripts/force-relogin.sh --restore      # 回滚：把最近一个 .disabled-* 改回原名
+#   scripts/force-relogin.sh --restore      # 回滚（当前登录态先另存为 .pre-restore-*）
 #
 # ⚠️ 实测局限（2026-09-22，WorkBuddy 5.5.6 / macOS）：
 #     这招**能拿到正确账号**（登录后本地列表立刻读到全部会话），
@@ -34,10 +34,16 @@ RESTORE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --intl) EDITION="intl"; shift ;;
-    --dir) DATA_DIR="$2"; shift 2 ;;
+    --dir)
+      # set -u 下缺值会直接 "unbound variable"，给出人话提示
+      if [ -z "${2:-}" ]; then
+        echo "❌ --dir 需要一个参数（数据目录路径）" >&2
+        exit 1
+      fi
+      DATA_DIR="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --restore) RESTORE=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "未知参数: $1（--help 看用法）"; exit 1 ;;
   esac
 done
@@ -57,24 +63,19 @@ if [ ! -d "$DATA_DIR" ]; then
   exit 1
 fi
 
-# ---------- 回滚模式 ----------
-if [ "$RESTORE" = "1" ]; then
-  latest="$(ls -1t "$SKEL"/account-snapshot.json.disabled-* 2>/dev/null | head -1 || true)"
-  if [ -z "$latest" ]; then
-    echo "ℹ️  没有找到 .disabled-* 备份，无需回滚。"
-    exit 0
-  fi
-  mv "$latest" "$SNAPSHOT"
-  echo "✅ 已还原: $(basename "$latest") -> account-snapshot.json"
-  exit 0
-fi
-
-# ---------- 前置：客户端必须完全退出 ----------
+# ---------- 前置：客户端必须完全退出（回滚模式同样适用） ----------
+# 以前 --restore 分支在检测之前就 exit 了：客户端还开着时还原快照，
+# 退出时它会再写回来，等于白做（脚本自己声明的安全行为也覆盖不到这条路径）。
 if [ "$FORCE" != "1" ]; then
   running=0
-  if command -v pgrep >/dev/null 2>&1 && pgrep -f "WorkBuddy" >/dev/null 2>&1; then
-    running=1
-  elif command -v tasklist >/dev/null 2>&1 && tasklist 2>/dev/null | grep -qi "workbuddy"; then
+  # pgrep -f 匹配整条命令行：脚本路径里含 workbuddy 时会把自己也算进去，
+  # 先排除当前进程 PID（$$），否则仓库放在 workbuddy-* 目录下就必然误报
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -f "WorkBuddy" 2>/dev/null | grep -qvE "^$$$|^$PPID$"; then
+      running=1
+    fi
+  elif command -v tasklist >/dev/null 2>&1 && \
+       tasklist /FO CSV /NH 2>/dev/null | cut -d, -f1 | grep -qi "workbuddy"; then
     running=1
   fi
   if [ "$running" = "1" ]; then
@@ -84,11 +85,48 @@ if [ "$FORCE" != "1" ]; then
   fi
 fi
 
+# ---------- 回滚模式 ----------
+if [ "$RESTORE" = "1" ]; then
+  latest="$(ls -1t "$SKEL"/account-snapshot.json.disabled-* 2>/dev/null | head -1 || true)"
+  if [ -z "$latest" ]; then
+    echo "ℹ️  没有找到 .disabled-* 备份，无需回滚。"
+    exit 0
+  fi
+  if [ -f "$SNAPSHOT" ]; then
+    # 用户可能已经重开客户端并登录了新账号：直接覆盖会把新的登录态弄丢，
+    # 先留一份 .pre-restore-*，至少还能换回来
+    ts="$(date +%Y%m%d-%H%M%S)-$$"   # 加 PID：同秒重复 --restore 不会互相覆盖
+    saved_backup="$SNAPSHOT.pre-restore-$ts"
+    mv "$SNAPSHOT" "$saved_backup" || {
+      echo "❌ 无法备份当前登录态（$SNAPSHOT），已中止；原快照未改动"
+      exit 1
+    }
+    echo "ℹ️  当前登录态已另存为 $saved_backup"
+    echo "   （想换回去：把它 mv 回 account-snapshot.json 即可）"
+  fi
+  mv "$latest" "$SNAPSHOT" || {
+    echo "❌ 还原快照失败"
+    if [ -n "${saved_backup:-}" ]; then
+      echo "   当前登录态已另存为：$saved_backup"
+      echo "   手动放回：mv \"$saved_backup\" \"$SNAPSHOT\""
+    else
+      echo "   本次没有产生 .pre-restore-* 备份（还原前不存在活动快照）"
+    fi
+    exit 1
+  }
+  # 清理放到核心恢复之后且全程 || true：set -euo pipefail 下，
+  # 旧备份删不掉不能让「当前快照已移走、新快照还没放回」的中间态终止脚本
+  (ls -1t "$SNAPSHOT".pre-restore-* 2>/dev/null | tail -n +4 | \
+    while IFS= read -r old; do rm -f "$old"; done) || true
+  echo "✅ 已还原: $(basename "$latest") -> account-snapshot.json"
+  exit 0
+fi
+
 # ---------- 主逻辑 ----------
 if [ ! -f "$SNAPSHOT" ]; then
   echo "ℹ️  $SNAPSHOT 不存在（已移走或从未登录过），无需处理。"
 else
-  ts="$(date +%Y%m%d-%H%M%S)"
+  ts="$(date +%Y%m%d-%H%M%S)-$$"   # 同秒二次运行不能覆盖上一份登录态备份
   mv "$SNAPSHOT" "$SNAPSHOT.disabled-$ts"
   echo "✅ 已移出: account-snapshot.json -> account-snapshot.json.disabled-$ts"
   echo "   （回滚：$0 $([ "$EDITION" = "intl" ] && echo --intl) --restore）"
