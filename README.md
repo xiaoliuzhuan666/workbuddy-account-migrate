@@ -205,15 +205,15 @@ python3 scripts/migrate.py --source <USER_ID> --yes --restart
 
 ### 退出码
 
-下表三个脚本共用，但 **`3` 只有 `migrate.py` 会产生**（整账号迁移才有"源账号空"这个概念；
-另两个脚本遇到源/目标版本目录没数据时是 `1`）。
+下表三个脚本共用。`3`（未做任何改动）由 `migrate.py` 与 `migrate_project.py` 产生；
+`migrate_session.py` 遇到源/目标版本目录里根本没有库时返回 `1`（版本选错）。
 
 | 退出码 | 含义 |
 |:---:|:---|
 | `0` | 确实迁移 / 回滚了东西 |
-| `1` | 出错（含：`migrate_session.py` 的源/目标版本目录里根本没有库 = 版本选错） |
+| `1` | 出错或未完成（含：`migrate_session.py` 的源/目标版本目录里根本没有库 = 版本选错；`migrate_project.py` 部分会话导入失败；用户在确认提示里选择取消） |
 | `2` | 「客户端必须关闭」检测拦截（检测到客户端仍在运行，或检测不可信且未给 `--force` / `--assume-clients-closed`） |
-| `3` | **仅 `migrate.py`**：无数据可迁，本次未做任何改动。涵盖两种情况——源账号确实没有 session / memory / connector；或源有数据但与目标完全一致、合并后没有任何新增内容 |
+| `3` | **未做任何改动**：`migrate.py` 无数据可迁（源账号确实没有 session / memory / connector，或源有数据但与目标完全一致、合并后无新增）；`migrate_project.py` 没有需要导入的会话（全部跳过） |
 
 > ⚠️ 自动化脚本不要把「退出码 0」当成「一定迁了东西」，也不要把「3」当成失败：
 > 它表示本次没有产生任何改动。判读建议：`0` → 成功，`3` → 跳过，其他 → 失败。
@@ -330,10 +330,10 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <SESSI
 | `--query` | 按标题 / 工作目录 / id 过滤列表 | - |
 | `--session-id` | 对话 id（支持前缀） | - |
 | `--mode` | `move`（迁移后删源）/ `copy`（保留源并克隆一份到目标账号） | **`move`** |
-| `--on-conflict` | `ask`/`skip`/`overwrite`/`newer`（无终端询问时 `ask` 降级为 `skip`） | `ask` |
+| `--on-conflict` | `ask`/`skip`/`overwrite`/`newer`（`ask` 配 `--yes` 时降级为 `skip`；无终端又没给 `--yes` 时按取消处理，退出码 1）。**软冲突的 `overwrite`/`newer` 会删除本机同标题对话，仍需 `--yes` 或终端确认**；**硬冲突（同 id）的 `overwrite`/`newer` 免确认，且 `move` 模式会删除源对话** | `ask` |
 | `--target-uid` | 手动指定目标版本的 user_id（不传则从 account-snapshot 推断）。**形态不像 UUID 时会先警告**（拼错会把对话挂到不存在的账号下，表现同样是"迁移成功但对话消失"）；非交互模式下还需再确认一次 | - |
 | `--dry-run` | 只打印计划不写盘（不会再弹冲突询问） | 关 |
-| `--yes` | 非交互模式：跳过「确认执行 / 确认回滚」这类询问。**冲突处理不受它控制**——由 `--on-conflict` 决定，`ask` 在无终端时降级为 `skip` | 关 |
+| `--yes` | 非交互模式：跳过「确认执行 / 确认回滚」这类询问。冲突处理由 `--on-conflict` 决定；`ask` 配 `--yes` 时降级为 `skip`（无终端又没给 `--yes` 时按取消处理） | 关 |
 | `--force` | 跳过"客户端必须关闭"检测 | 关 |
 | `--assume-clients-closed` | 比 `--force` 温和：只在**进程检测本身失败**（查不出结果）时按「客户端已退出」继续；**真检测到客户端仍在运行时照样拦下** | 关 |
 | `--backups` / `--rollback TAG` | 查看备份 / 回滚（`--rollback` 支持标签前缀） | - |
@@ -378,8 +378,13 @@ python3 scripts/migrate_project.py info 项目A.wbproj                     # 查
 python3 scripts/migrate_project.py import 项目A.wbproj --cwd /新路径 --dry-run
 python3 scripts/migrate_project.py import 项目A.wbproj --cwd /新路径 --on-conflict overwrite
 python3 scripts/migrate_project.py --backups                             # 查看备份
+python3 scripts/migrate_project.py --backups --dir /自定义数据目录        # 同上，指定数据目录（与 --rollback 一致）
 python3 scripts/migrate_project.py --rollback <TAG>                      # 回滚一次导入
 ```
+
+> `--backups` / `--rollback` / `export` / `import` 都遵循 `--dir` / `--intl`；
+> `--force` / `--yes` 可以写在子命令前或后（`--force import x` 与 `import x --force` 等价）。
+> `--assume-clients-closed` 与另两个脚本同义：只在**检测本身失败**时继续，真检测到客户端仍会拦截。
 
 **设计边界**：工具只做「打包」和「解包」两件纯本地的事。包怎么传（AirDrop / U 盘 / scp / 网盘）、项目在目标机放哪、用哪个账号登录——全部由你决定。导入时自动把 `user_id` 改写为**目标机登录账号**、`cwd` 与正文内嵌路径改写为新路径，无需手动处理。
 
@@ -398,13 +403,22 @@ python3 scripts/migrate_project.py --rollback <TAG>                      # 回�
 
 | 冲突 | 行为 |
 |:---|:---|
-| 同 id（重复导入同一个包） | **覆盖**——反复导入不会产生双份对话 |
-| 同标题不同 id | 默认跳过并警告；交互模式询问 |
-| 非交互终端（无 TTY） | 一律降级跳过，需显式 `--on-conflict overwrite` 批量覆盖 |
+| 同 id（重复导入同一个包） | 默认 `--on-conflict ask`：交互模式逐个询问；**无 TTY 时降级为跳过**（不会自动覆盖）。要「反复导入不出双份」请显式加 `--on-conflict overwrite` |
+| 同标题不同 id | 默认跳过并警告；交互模式询问；`--on-conflict overwrite` 时按「仍导入」处理（id 不同，不删本地那条） |
+| 非交互终端（无 TTY） | 一律降级跳过，需显式 `--on-conflict overwrite` 才继续导入 |
 
 回滚：导入自动备份，`--backups` 查看、`--rollback <TAG>` 整体还原（数据库快照 + 文件）。工作区记忆合并是追加式文本，不参与回滚。
 
-> ⚠️ **平台说明**：本脚本逻辑复用 v1.6 系列已验证机制（列名对齐、目录/文件统一复制、WAL checkpoint），并附 37 项合成 fixture 测试（两台"虚拟机器"全链路）。但**跨设备全流程尚未在两台真机间实测**，首次使用建议先 `--dry-run`，欢迎提 Issue 反馈。
+> **`export --out` 不再覆盖已有包**：若目标文件已存在会直接报错退出（请换名或先移走旧包），
+> 以免一次失败的打包把上次留档的包一起删掉。
+
+> **`migrate_project.py import` 另有 `--target-uid`**：登录态快照缺失时可显式指定目标账号 user_id，
+> 不必用 `--yes` 跳过所有写入确认；形态不像 UUID 会先警告，非 `--yes` 时还需二次确认。
+> 拼错会让整批会话挂到不存在的账号下（"导入成功但对话消失"），请从客户端登录态里复制。
+
+> **包格式版本**：包内 `manifest.format_version` 高于本工具支持的版本时，导入会**直接拒绝**并提示升级工具（避免旧工具按旧语义解包）。低版本（v1）包会**告警后继续导入**：v1 的 BLOB 列是文本 repr，若含 BLOB 会以 TEXT 写回且类型不可逆；建议用当前版本重新导出。`format_version` 缺失按 v1 处理，非整数值直接拒绝。
+
+> ⚠️ **平台说明**：本脚本逻辑复用 v1.6 系列已验证机制（列名对齐、目录/文件统一复制、WAL checkpoint），并附 53 项合成 fixture 测试，覆盖两台"虚拟机器"全链路（53 为本机实测数量；未运行 WorkBuddy 时个别用例会跳过，以运行末尾「结果」行为准）。但**跨设备全流程尚未在两台真机间实测**，首次使用建议先 `--dry-run`，欢迎提 Issue 反馈。
 
 ### 工作原理
 
@@ -461,6 +475,14 @@ python3 scripts/migrate_session.py --rollback 20260922000000_domestic2intl_12345
 # 整库恢复（migrate_session.py）：把迁移波及到的库整体还原到迁移那一刻
 python3 scripts/migrate_session.py --rollback 20260922000000_domestic2intl_12345678 --full
 ```
+
+> ⚠️ **备份与工具版本要配套**：本版起单对话备份的正文按 `files/<slug>/<name>` 存放（`meta.json` 记 `rel`）。
+> 用**旧版本工具**回滚本版产出的备份时，旧版只认旧布局的平铺 `files/<name>`，会找不到正文并**静默跳过还原**
+> （库行回来了，正文没回来）。回滚请使用**同一或更新版本**的工具；反过来，旧版产出的平铺备份本版可以正常回滚。
+
+> ℹ️ **备份搬到别的机器 / 数据目录换了位置**：`meta.json` 里的正文路径是迁移时记录的绝对路径。
+> 回滚会校验它们是否仍在当前两个版本的数据目录内；不在的条目会跳过并在收尾逐条列出，
+> 不会写到别处。这类备份请改用备份里的 `snapshot_*.db` 整库快照兜底。
 
 > ℹ️ **`--full` 的还原范围**：整库恢复会把迁移**波及到**的数据库整体还原到迁移那一刻
 > （库 + 正文 + 任务），所以迁移之后新增的对话与消息会一并丢失，确认前脚本会明确提示。
@@ -555,7 +577,7 @@ workbuddy-account-migrate/
 ├── tests/
 │   ├── prepare_fixture.py                 # 构造临时测试 fixture（只读复制真实数据）
 │   ├── run_tests.py                       # 端到端 + 单元级测试（用例数随 fixture 内容浮动，以运行末尾输出为准）
-│   └── run_project_tests.py               # 跨设备项目迁移合成测试（37 项，不依赖真实数据）
+│   └── run_project_tests.py               # 跨设备项目迁移合成测试（53 项，数量随环境浮动，不依赖真实数据）
 └── references/
     └── data_isolation_map.md              # 数据隔离全景图
 ```
@@ -594,9 +616,9 @@ workbuddy-account-migrate/
 - **小白向导**：无参数运行即进向导（源机选「打包带走」/ 目标机选「导入进来」），全程输序号 + 拖文件；导出包默认放**桌面**，导入自动发现**桌面/下载**里的包；交互导入写入前有确认步骤（小白的 dry-run 替代品）
 - **export**：按 `cwd` 列出项目 → 打包为 `.wbproj`（sessions/usage/正文/tool-results/todos/tasks/工作区记忆 + manifest）。**只读操作**，客户端开着也能跑
 - **import**：探测目标机登录 uid（account-snapshot 权威）→ 指定新路径（强制校验存在）→ 重映射写入（`user_id`/`cwd`/slug 重推导/jsonl 顶层 cwd 字段流式改写）
-- **冲突语义**：同 id 覆盖（反复导入不出双份，"两地交替"靠它）；同标题不同 id 默认跳过；无 TTY 降级跳过，`--on-conflict overwrite` 批量覆盖
+- **冲突语义**：同 id 默认 `ask`（交互逐个询问），**无 TTY 降级跳过**；要「反复导入不出双份」须显式 `--on-conflict overwrite`。同标题不同 id 默认跳过，`overwrite` 时按「仍导入」处理（id 不同，不删本地那条）
 - **回滚**：导入前 sqlite backup API 整库快照 + 覆盖文件 stash，`--rollback` 一键还原（还原前清理残留 `-wal/-shm`，防陈旧 WAL 重放）
-- **测试**：`tests/run_project_tests.py` 37 项合成 fixture 测试——两台"虚拟机器"（不同 uid / 不同路径风格 / 不同表列集合）走 export→传输→import→重复导入→回滚全链路，不依赖真实数据
+- **测试**：`tests/run_project_tests.py` 53 项合成 fixture 测试（本机实测数量；未运行 WorkBuddy 时个别用例会跳过，以运行末尾「结果」行为准）——两台"虚拟机器"（不同 uid / 不同路径风格 / 不同表列集合）走 export→传输→import→重复导入→回滚全链路，不依赖真实数据
 - **明确不做**：网络传输、账号级 memory/connectors 合并、自动双向同步（传输交给用户，二期再议）
 
 #### v1.6.3 (2026-09-22)
@@ -862,14 +884,14 @@ Backups in the old location are still found (both directories are scanned). `--b
 
 ### Exit codes
 
-All three scripts share this table, **except `3`, which only `migrate.py` can return** — "nothing to migrate" is a whole-account concept. The single-session script exits `1` when the source or target edition has no DB at all.
+All three scripts share this table. `3` (nothing was changed) is returned by `migrate.py` and `migrate_project.py`; `migrate_session.py` returns `1` when the source or target edition has no DB at all (wrong edition).
 
 | Code | Meaning |
 |:---:|:---|
 | `0` | Something was actually migrated / rolled back |
-| `1` | Error (including: `migrate_session.py` found no DB in the source or target edition — wrong edition) |
+| `1` | Error or incomplete (including: `migrate_session.py` found no DB in the source or target edition — wrong edition; `migrate_project.py` failed to import some sessions; the user cancelled at a confirmation prompt) |
 | `2` | Blocked by the "clients must be closed" check (a client is running, or detection was unreliable and no `--force` / `--assume-clients-closed` was given) |
-| `3` | **`migrate.py` only**: nothing to migrate, nothing was changed. Covers two cases — the source account really has no session / memory / connector, *or* it has data that was already identical to the target, so the merge produced nothing new |
+| `3` | **Nothing was changed**: `migrate.py` had nothing to migrate (the source account really has no session / memory / connector, *or* it had data already identical to the target); `migrate_project.py` had no sessions to import (all skipped) |
 
 > ⚠️ Do not treat exit code `0` as "data was definitely moved" in automation, and do not treat `3` as a failure: it means nothing was changed. Rule of thumb: `0` → success, `3` → skipped, anything else → failure.
 >
@@ -951,6 +973,18 @@ python3 scripts/migrate_session.py --rollback 20260922000000_domestic2intl_12345
 python3 scripts/migrate_session.py --rollback 20260922000000_domestic2intl_12345678 --full
 ```
 
+> ⚠️ **Match the backup to the tool version**: since this version, single-session backups store
+> transcripts as `files/<slug>/<name>` (`rel` in `meta.json`). Rolling back such a backup with an
+> **older tool** makes it look for the old flat `files/<name>` layout, so it **silently skips**
+> transcript restore (DB rows come back, transcripts do not). Roll back with the **same or a newer**
+> tool version. Flat backups produced by older tools are still restorable by this version.
+
+> ℹ️ **Backup moved to another machine / data directory relocated**: transcript paths in
+> `meta.json` are absolute paths recorded at migration time. Rollback verifies they still fall
+> inside the two current edition data roots; entries outside are skipped and listed in the
+> summary instead of being written elsewhere. Use the `snapshot_*.db` whole-DB snapshots in
+> the backup as a fallback.
+
 > ℹ️ **What `--full` restores**: it rolls the databases the migration **touched** back to the
 > moment of migration (DB + transcripts + tasks), so conversations and messages created
 > *after* the migration are lost along with it — the script warns explicitly before you confirm.
@@ -1027,15 +1061,16 @@ python3 scripts/migrate_session.py --from domestic --to intl --session-id <ID>
 | `--list` / `--query` | list conversations (optionally filtered by title / cwd / id) | - |
 | `--session-id` | conversation id (prefix accepted) | - |
 | `--mode` | `move` (delete source) / `copy` (keep source) | **`move`** |
-| `--on-conflict` | `ask` / `skip` / `overwrite` / `newer` (without a TTY `ask` degrades to `skip`) | `ask` |
+| `--on-conflict` | `ask` / `skip` / `overwrite` / `newer` (`ask` degrades to `skip` when combined with `--yes`; without a TTY and without `--yes` it is treated as cancel, exit code 1). **For soft conflicts (same title, different id) `overwrite`/`newer` delete the local same-titled conversation and still require `--yes` or a per-session confirmation**; **for hard conflicts (same id) `overwrite`/`newer` skip confirmation and `move` mode deletes the source** | `ask` |
 | `--target-uid` | pin the target edition's user_id (otherwise inferred from `account-snapshot.json`). **Warns first if the value doesn't look like a UUID** — a typo would attach the conversation to a non-existent account, which looks exactly like "migrated fine but the conversation vanished"; in non-interactive mode it asks for one more confirmation | - |
 | `--dry-run` | print the plan, write nothing (no conflict prompt either) | off |
-| `--yes` | skip confirmation prompts — **conflict handling is governed by `--on-conflict`, not by this flag** | off |
+| `--yes` | skip confirmation prompts — conflict handling is governed by `--on-conflict`; `ask` degrades to `skip` when combined with `--yes` | off |
 | `--force` | skip the "clients must be closed" check | off |
-| `--assume-clients-closed` | gentler than `--force` and accepted by both scripts: continues only when process **detection itself fails**; still blocks when a client is actually detected running | off |
+| `--assume-clients-closed` | gentler than `--force` and accepted by all three scripts: continues only when process **detection itself fails**; still blocks when a client is actually detected running | off |
 | `--backups` / `--rollback TAG` | list backups / roll back (prefix accepted) | - |
 | `--full` | with `--rollback` only: whole-DB restore (DB + transcript + tasks). On its own it **errors out** | off |
 | `--backup-dir` | backup dir (**this script only** — `migrate.py` has no such flag): new backups go to `<dir>/session/`; also an **extra** search root when looking up / rolling back | - |
+
 
 Without `--session-id` you get the interactive wizard, which passes `--mode` / `--yes` / `--dry-run` / `--target-uid` / `--backup-dir` / `--assume-clients-closed` / `--on-conflict` / `--from` / `--to` / `--query` through.
 
@@ -1142,16 +1177,33 @@ python3 scripts/migrate_project.py export --cwd /path/ProjectA --out /tmp/Projec
 python3 scripts/migrate_project.py info ProjectA.wbproj
 python3 scripts/migrate_project.py import ProjectA.wbproj --cwd /new/path --dry-run
 python3 scripts/migrate_project.py import ProjectA.wbproj --cwd /new/path --on-conflict overwrite
+python3 scripts/migrate_project.py --backups                             # list backups
+python3 scripts/migrate_project.py --backups --dir /custom/data/dir      # same, with an explicit data dir
 python3 scripts/migrate_project.py --rollback <TAG>
 ```
+
+> `--backups` / `--rollback` / `export` / `import` all honour `--dir` / `--intl`.
+> `--force` / `--yes` may be written before or after the subcommand (`--force import x` ≡ `import x --force`).
+> `--assume-clients-closed` matches the other two scripts: it only applies when **detection itself failed**; a client actually found running is still blocked.
 
 **Scope**: the tool only packs and unpacks. How you transfer the file (AirDrop / USB / scp), where the project lives on the target machine, which account you log in with — all up to you. On import, `user_id` is rewritten to the **target machine's login account**, `cwd` and in-transcript paths are remapped to the new path automatically.
 
 **Package contents**: session + usage rows, transcripts (`projects/{slug}/`), `tool-results/`, `todos/`, `tasks/`, and the project's `.workbuddy/` workspace memory (opt out with `--no-workspace-memory`). Account-level memory/connectors are **out of scope**.
 
-**Conflict semantics**: same-id conflicts are **overwritten** (re-importing the same package never duplicates conversations); same-title-different-id defaults to skip; non-interactive terminals degrade to skip unless `--on-conflict overwrite` is given. Imports are backed up and reversible via `--rollback <TAG>`.
+**Conflict semantics**: same-id conflicts default to `--on-conflict ask` — asked per session in a TTY, and **degraded to skip without a TTY** (nothing is overwritten automatically; pass `--on-conflict overwrite` for "re-import never duplicates"). Same-title-different-id defaults to skip; non-interactive terminals degrade to skip unless `--on-conflict overwrite` is given. Imports are backed up and reversible via `--rollback <TAG>`.
 
-> The script reuses mechanisms battle-tested in v1.6 (column-name-aligned inserts, file/dir-safe copies, WAL checkpointing) and ships with 37 synthetic fixture tests; the full cross-device flow has not yet been verified between two real machines — run `--dry-run` first and report issues.
+> **`export --out` refuses to overwrite an existing package**: if the target already exists,
+> export exits with an error (pick another `--out` or move the old package away), so a failed
+> pack can never delete your previous archive.
+
+> **`migrate_project.py import` also accepts `--target-uid`**: pin the target user_id when the login
+> snapshot is missing (avoids `--yes` skipping every confirmation). It warns if the value does not look
+> like a UUID and asks for a second confirmation unless `--yes`. A typo hides the whole import.
+
+> **Package format version**: if `manifest.format_version` in the package is higher than this tool supports, import **refuses** and asks you to upgrade the tool (so an old tool never unpacks a newer layout with v1 semantics). v1 / missing-version packages import **with a warning**: v1 stores BLOB columns as text repr, so BLOBs are written back as TEXT (irreversible) — re-export with the current tool instead. A non-integer `format_version` is rejected.
+
+
+> The script reuses mechanisms battle-tested in v1.6 (column-name-aligned inserts, file/dir-safe copies, WAL checkpointing) and ships with 53 synthetic fixture checks (as measured locally; some are skipped when no client is running — trust the final result line); the full cross-device flow has not yet been verified between two real machines — run `--dry-run` first and report issues.
 
 ### Contributing
 
@@ -1170,9 +1222,9 @@ python3 scripts/migrate_project.py --rollback <TAG>
 - **Beginner wizard**: run with no arguments (source machine: "pack & take away" / target machine: "import"); pick numbers and drag files throughout; exported packages land on the **Desktop**, imports auto-discover packages on **Desktop/Downloads**; interactive imports confirm before writing
 - **export**: lists projects by `cwd`, packs sessions/usage/transcripts/tool-results/todos/tasks/workspace memory into a `.wbproj` archive with a manifest. Read-only — safe while the client runs
 - **import**: detects the target machine's login uid (account-snapshot authoritative), validates the new local path, remaps everything (`user_id`, `cwd`, slug re-derived from the new path, in-transcript top-level `cwd` fields rewritten streaming)
-- **Conflicts**: same id → overwrite (re-import never duplicates; this is what makes alternating use work); same title different id → skip by default; non-TTY degrades to skip, `--on-conflict overwrite` to force
+- **Conflicts**: same id → ask by default (per-session in a TTY; **skip without a TTY**); `--on-conflict overwrite` for "re-import never duplicates"; same title different id → skip by default; non-TTY degrades to skip
 - **Rollback**: sqlite backup-API snapshot + stashed overwritten files before import; `--rollback` restores the whole thing (stale `-wal/-shm` are cleared first so old WAL frames can't replay over the restore)
-- **Tests**: `tests/run_project_tests.py` — 37 synthetic fixture checks running export → transfer → import → re-import → rollback across two "virtual machines" with different uids, path styles and table schemas; no real data required
+- **Tests**: `tests/run_project_tests.py` — 53 synthetic fixture checks (as measured locally; some are skipped when no client is running) running export → transfer → import → re-import → rollback across two "virtual machines" with different uids, path styles and table schemas; no real data required
 - **Explicitly out of scope**: network transfer, account-level memory/connector merging, automatic two-way sync (a possible later phase)
 
 #### v1.6.3 (2026-09-22)

@@ -37,10 +37,13 @@ WorkBuddy 单对话跨版本迁移工具（国内版 ⇄ 国际版）
 """
 
 import argparse
+import base64
 import io
 import json
+import ntpath
 import os
 import platform
+import posixpath
 import re
 import shutil
 import sqlite3
@@ -83,6 +86,9 @@ if platform.system() == "Windows":
 
 # ---------------------------------------------------------------- 常量
 
+# 备份 meta 布局版本：v3 起正文按 {slug}/{name} 存（v2 及更早是平铺 name）
+BACKUP_META_VERSION = 3
+
 EDITIONS = {"domestic": "国内版", "intl": "国际版"}
 EDITION_DIR = {"domestic": ".workbuddy", "intl": ".workbuddy-ai"}
 
@@ -105,13 +111,17 @@ _LEGACY_PATH_VARS = (
     "STORAGE_JSON",
 )
 
+# 用户取消标记：各取消点只 print 就 return，main() 无法区分「取消」与「成功」。
+# 用可变容器记一笔（不需要每处 global），__main__ 据此以非零退出。
+_STATE = {"cancelled": False}
+
 # ---------------------------------------------------------------- 通用工具
 
 
 def resolve_home() -> Path:
     """home 目录，支持环境变量覆盖（测试时指向临时 fixture）"""
     env = os.environ.get("WORKBUDDY_MIGRATE_HOME")
-    return Path(env) if env else Path.home()
+    return Path(env).expanduser().resolve() if env else Path.home().resolve()
 
 
 def _to_int(v, default=0) -> int:
@@ -409,16 +419,17 @@ def table_columns(conn, table):
         return []
 
 
-def _report_verify(ok_text: str, n: int, expect: int = 1) -> None:
-    """打印写入验证结果，命中行数不符时明确告警
+def _report_verify(ok_text: str, n: int, expect: int = 1) -> bool:
+    """打印写入验证结果，返回是否通过
 
     以前这几处只把 COUNT(*) 打印出来（"验证命中 n 行"），不做任何断言：
     写入实际没生效时照样显示 ✅，用户会被误导。
     """
     if n == expect:
         print(f"  ✅ {ok_text}（验证命中 {n} 行）")
-    else:
-        print(f"  ⚠️  验证异常：{ok_text} —— 预期 {expect} 行，实际 {n} 行，请人工确认")
+        return True
+    print(f"  ⚠️  验证异常：{ok_text} —— 预期 {expect} 行，实际 {n} 行，请人工确认")
+    return False
 
 
 def _warn_db_unreadable(ep: "EditionPaths"):
@@ -495,10 +506,9 @@ def _uid_src_text(how: str) -> str:
     """
     if legacy is not None and hasattr(legacy, "uid_source_label"):
         return legacy.uid_source_label(how)
-    # 拿不到 migrate.py 时**不要**在本地再抄一份映射表：那份表和
-    # migrate.uid_source_label() 必然漂移（改一处忘一处），宁可少说。
-    # 走到这里意味着 migrate.py 都找不到了，此时也本该提示用户先修环境。
-    return "未知来源（未找到 scripts/migrate.py，无法确认）"
+    # 拿不到 migrate.py 时不要把「找不到 migrate.py」当成来源说明 —— 那是在描述
+    # 环境而不是账号来源，用户会被引去修一个其实没坏的环境。
+    return f"未知来源（{how}）"
 
 
 def _warn_weak_target_uid(how: str):
@@ -544,16 +554,15 @@ def get_current_uid(ep: EditionPaths):
     except Exception:
         pass
 
-    # 2. 复用 migrate.py 那套（snapshot → 平台 storage.json（仅国内版）→ DB），
-    #    并**连来源一起取回**。
-    #    ⚠️ 以前这里调的是只返回 uid 的 get_current_user_id()：登录态文件都读不到时，
-    #    它内部的 DB 兜底会静默返回一个 uid，来源被标成 "legacy(...)"，
-    #    于是下面第 3 步（真正打 db-majority 标签的那一路）永远到不了 ——
-    #    "只剩 DB 反推"这种最危险的情况反而是唯一没有告警的。
-    if legacy is not None and hasattr(legacy, "_resolve_current_uid"):
+    # 2. 平台 storage.json（仅国内版兜底）→ 3. DB 反推，整条链交给 migrate.py 的
+    #    resolve_current_uid()：它连来源一起返回，两脚本共用同一套顺序。
+    #    ⚠️ 以前这里调的是 `_resolve_current_uid` —— 该函数从未在 migrate.py 里存在过，
+    #    hasattr 恒假 → 国内版的 storage.json 兜底整档失效，直接落到「DB 里 session
+    #    最多」（典型机器上正是旧账号），也就是 H1 那条「迁移成功但对话消失」的路径。
+    if legacy is not None and hasattr(legacy, "resolve_current_uid"):
         try:
             with ep.bind_legacy():
-                uid, src = legacy._resolve_current_uid()
+                uid, src = legacy.resolve_current_uid()
             if uid:
                 return uid, src
         except Exception:
@@ -571,8 +580,9 @@ def get_current_uid(ep: EditionPaths):
             ).fetchone()
             if row and row[0]:
                 return row[0], "db-majority"
-        except Exception:
-            pass
+        except Exception as e:
+            # 这只是「从 DB 反推当前账号」的兜底查询，失败不该带崩整个推断流程
+            print(f"  ⚠️  从 DB 推断当前账号失败：{e}")
         finally:
             conn.close()
 
@@ -669,6 +679,10 @@ def copy_path(src: Path, dst: Path):
         shutil.copytree(str(src), str(dst))
     else:
         dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            # 覆盖只读目标前先补写权限：copy2 写只读文件会 PermissionError
+            # （回滚"还原被覆盖的文件"正好会撞上）
+            _ensure_writable(dst)
         shutil.copy2(str(src), str(dst))
     _ensure_writable(dst)
 
@@ -757,6 +771,20 @@ def _abort_backup(bp: Path, msg: str):
     """
     shutil.rmtree(str(bp), ignore_errors=True)
     raise RuntimeError(msg)
+
+
+def _strip_sandbox_shim():
+    """WorkBuddy 会话内运行时剥离注入的 PYTHONPATH 并 re-exec 自身
+
+    与 migrate.py 同一处理：注入的 sitecustomize.py 会劫持 Path.mkdir，
+    即使 exist_ok=True，目录已存在也抛 EEXIST。本脚本有大量 mkdir，
+    以前只有整账号脚本会剥离，单对话脚本在会话内运行仍会崩。
+
+    只在 `__main__` 里调用（不是 main() 内部）：测试会进程内直接调 main()，
+    在这里 re-exec 会把整个测试进程换掉。
+    """
+    if os.environ.pop("PYTHONPATH", None) is not None:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def safe_copy(src: Path, dst: Path) -> bool:
@@ -1084,6 +1112,24 @@ def _remove_db_sidecars(db_path: Path) -> bool:
     return legacy._remove_db_sidecars(db_path)
 
 
+def _json_default(o):
+    """备份 JSON 里的 BLOB 用 base64 + 标记，别用 default=str 变成 repr 文本"""
+    if isinstance(o, (bytes, bytearray, memoryview)):
+        return {"__b64__": base64.b64encode(bytes(o)).decode("ascii")}
+    return str(o)
+
+
+def _revive_blobs(row: dict) -> dict:
+    for k, v in list(row.items()):
+        if isinstance(v, dict) and set(v) == {"__b64__"}:
+            try:
+                row[k] = base64.b64decode(v["__b64__"], validate=True)
+            except (ValueError, TypeError):
+                print(f"  ⚠️  {k} 的 base64 无法解码，已置空")
+                row[k] = b""
+    return row
+
+
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8"):
     """原子写：先写同名 .tmp 再 os.replace
 
@@ -1100,7 +1146,9 @@ def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8"):
     """
     tmp = Path(str(path) + ".tmp")
     try:
-        with open(tmp, "w", encoding=encoding) as f:
+        # surrogateescape：与 migrate.py 的同名实现保持一致。strict 会让含非 UTF-8
+        # 字节的路径/正文在写 meta 时抛 UnicodeEncodeError（两份实现已实际漂移过）
+        with open(tmp, "w", encoding=encoding, errors="surrogateescape") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -1125,6 +1173,28 @@ def _write_meta(bp: Path, meta: dict):
     _atomic_write_text(
         bp / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2)
     )
+
+
+def _reject_duplicate_names(bp, files, label):
+    """同一会话的正文散落在多个 projects/<slug>/ 下时，复制到目标会互相覆盖。
+
+    备份键已改为 `{slug}/{name}`（不会覆盖），但复制侧仍是 `dst_dir / f.name`：
+    两个 slug 下的同名正文会先后写进同一个目标目录，后者覆盖前者。既然无从判断
+    客户端真正在用的是哪一份，就在备份阶段提前拒绝，宁可不动数据。
+    """
+    names = [f.name for f in files if f.exists()]
+    if len(set(names)) != len(names):
+        dups = sorted({x for x in names if names.count(x) > 1})
+        paths = [str(f) for f in files if f.exists() and f.name in dups]
+        _abort_backup(
+            bp,
+            f"{label} 里同一会话的正文在多个 slug 目录下重名"
+            f"（{', '.join(dups[:3])}{' …' if len(dups) > 3 else ''}）：\n"
+            + "\n".join(f"       {x}" for x in paths[:6])
+            + (f"\n       （共 {len(paths)} 项）" if len(paths) > 6 else "")
+            + "\n     复制到目标时这些同名正文会写到同一路径、互相覆盖；"
+              "无法判断客户端在用哪一份，已中止（未改动任何数据）。"
+              "请只保留正在使用的那份目录后重试")
 
 
 def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
@@ -1160,7 +1230,8 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         _abort_backup(bp, f"无法创建备份目录：{e}")
 
     meta = {
-        "version": 2,
+        # v3：正文备份键改为 {slug}/{name} 相对路径（v2 及更早是平铺 name）
+        "version": BACKUP_META_VERSION,
         "kind": kind,
         "created_at": datetime.now().isoformat(),
         "tag": tag,
@@ -1181,10 +1252,11 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
 
     # 源行 + 源文件
     (bp / "src_session.json").write_text(
-        json.dumps(src_row, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+        json.dumps(src_row, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
     )
     src_files = find_project_files(src_ep, session_id)
     if src_files:
+        _reject_duplicate_names(bp, src_files, "源侧正文")
         try:
             (bp / "files").mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -1192,9 +1264,13 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         for f in src_files:
             if not f.exists():
                 continue
-            if not safe_copy(f, bp / "files" / f.name):
+            # 按 <slug>/<name> 存：同一 sid 散落在多个 projects/*/ 时不会互相覆盖
+            rel = f.relative_to(src_ep.projects_dir).as_posix()
+            dst = bp / "files" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not safe_copy(f, dst):
                 _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
-            meta["src_files"].append({"name": f.name, "path": str(f), "is_dir": f.is_dir()})
+            meta["src_files"].append({"name": f.name, "rel": rel, "path": str(f), "is_dir": f.is_dir()})
 
     # 目标原有行 + 原文件（覆盖场景）
     # 注意：文件备份必须在 dst_row 判据【之外】——目标侧的附属文件可能根本没有
@@ -1202,10 +1278,11 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
     # 挂在 if dst_row 里就等于"想删又没备份"，只能不删 → 孤儿永远留着。
     if dst_row:
         (bp / "dst_session.json").write_text(
-            json.dumps(dst_row, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            json.dumps(dst_row, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
         )
     dst_files = find_project_files(dst_ep, session_id)
     if dst_files:
+        _reject_duplicate_names(bp, dst_files, "目标侧原有正文")
         # 没有目标行却有一堆附属文件 = 上一次迁移留下的孤儿。
         # 这个标记刻意只写不读：清理由上面的 always 分支负责，读它反而会引入
         # 第二个事实来源。留在 meta.json 里是给用户求助时看的现场证据
@@ -1218,17 +1295,22 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         for f in dst_files:
             if not f.exists():
                 continue
-            if not safe_copy(f, bp / "dst_files" / f.name):
+            # 按 <slug>/<name> 存：同一 sid 散落在多个 projects/*/ 时不会互相覆盖
+            rel = f.relative_to(dst_ep.projects_dir).as_posix()
+            dst = bp / "dst_files" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not safe_copy(f, dst):
                 _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
-            meta["dst_files"].append({"name": f.name, "path": str(f), "is_dir": f.is_dir()})
+            meta["dst_files"].append({"name": f.name, "rel": rel, "path": str(f), "is_dir": f.is_dir()})
 
     # 软冲突：被覆盖的那条目标记录（id 与源不同）
     if extra_row:
         (bp / "override_session.json").write_text(
-            json.dumps(extra_row, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            json.dumps(extra_row, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
         )
         ov_files = find_project_files(dst_ep, extra_row.get("id", ""))
         if ov_files:
+            _reject_duplicate_names(bp, ov_files, "被覆盖的目标旧对话正文")
             try:
                 (bp / "override_files").mkdir(parents=True, exist_ok=True)
             except Exception as e:
@@ -1236,10 +1318,13 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
             for f in ov_files:
                 if not f.exists():
                     continue
-                if not safe_copy(f, bp / "override_files" / f.name):
+                rel = f.relative_to(dst_ep.projects_dir).as_posix()
+                dst = bp / "override_files" / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not safe_copy(f, dst):
                     _abort_backup(bp, "备份不完整，已中止迁移（未改动任何数据）")
                 meta.setdefault("override_files", []).append(
-                    {"name": f.name, "path": str(f), "is_dir": f.is_dir()}
+                    {"name": f.name, "rel": rel, "path": str(f), "is_dir": f.is_dir()}
                 )
         meta["override_id"] = extra_row.get("id", "")
 
@@ -1251,17 +1336,25 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
     for tag_, ep, uid_sid in usage_targets:
         conn = connect_ro(ep.db)
         if conn is None:
-            continue
+            # 精确回滚会无条件 DELETE session_usage，缺了这份备份就永久丢记录
+            _abort_backup(bp, f"无法读取 {ep.db.name} 备份用量记录（{tag_}），未改动任何数据")
         try:
+            if not table_columns(conn, "session_usage"):
+                # 缺表与「写盘失败」性质不同：前者本来就没有用量记录可丢，
+                # 与 collect_info / migrate_project 同口径容忍，不能整条迁移中止
+                print(f"  ℹ️  {ep.label} 没有 session_usage 表，跳过 {tag_} 备份")
+                continue
             r = conn.execute("SELECT * FROM session_usage WHERE session_id = ?", (uid_sid,)).fetchone()
             if r:
                 cols = table_columns(conn, "session_usage")
                 (bp / tag_).write_text(
-                    json.dumps(dict(zip(cols, r)), ensure_ascii=False, indent=2, default=str),
+                    json.dumps(dict(zip(cols, r)), ensure_ascii=False, indent=2,
+                               default=_json_default),
                     encoding="utf-8",
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            # 只告警不够：备份没写全就继续，回滚时仍然补不回来
+            _abort_backup(bp, f"备份 {tag_} 失败：{e}（精确回滚需要它恢复用量记录）")
         finally:
             conn.close()
 
@@ -1280,11 +1373,14 @@ def create_backup(src_ep, dst_ep, src_row, dst_row, session_id, mode,
         else:
             _abort_backup(bp, f"备份任务数据 {tdir.name} 失败（未改动任何数据）")
 
-    # 整库快照（兜底）；同版本迁移时两库是同一个，只快照一次
-    if src_ep.db.exists():
-        snapshot_db(src_ep.db, bp / "snapshot_src.db")
+    # 整库快照（兜底）；同版本迁移时两库是同一个，只快照一次。
+    # 快照失败必须中止：没有整库快照的备份在 --full 时救不了任何东西，
+    # 用户却以为有安全网。
+    if src_ep.db.exists() and not snapshot_db(src_ep.db, bp / "snapshot_src.db"):
+        _abort_backup(bp, "整库快照失败（源库），未改动任何数据")
     if dst_ep.db.exists() and dst_ep.db != src_ep.db:
-        snapshot_db(dst_ep.db, bp / "snapshot_dst.db")
+        if not snapshot_db(dst_ep.db, bp / "snapshot_dst.db"):
+            _abort_backup(bp, "整库快照失败（目标库），未改动任何数据")
 
     if extra_meta:
         meta.update(extra_meta)
@@ -1320,6 +1416,19 @@ def _backup_roots(backup_root=None):
     return uniq
 
 
+def _has_usage_table(conn) -> bool:
+    """目标/源库是否真有 session_usage 表。
+
+    查不出来时按「有表」处理：宁可后面报数据库错误，也不能静默跳过用量记录。
+    """
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_usage'"
+        ).fetchone())
+    except sqlite3.Error:
+        return True
+
+
 def _validate_backup_tag(tag):
     """备份标签合法性检查：只能是备份目录名，不能有路径成分
 
@@ -1332,6 +1441,7 @@ def _validate_backup_tag(tag):
     return not (not tag
                 or "/" in tag or "\\" in tag
                 or os.path.isabs(tag)
+                or re.match(r"^[A-Za-z]:", tag)   # Windows 盘符相对路径（C:xxx）
                 or ".." in Path(tag).parts)
 
 
@@ -1373,11 +1483,13 @@ def find_backup(tag, backup_root=None):
         _warn_backup_root_mismatch(backup_root, hit_root[hits[0].name])
         return hits[0], None
     if len(hits) > 1:
-        # 以前是直接 return None，用户只看到"找不到备份"，实际是前缀歧义
+        # 以前是直接 return None，用户只看到"找不到备份"，实际是前缀歧义。
+        # 这里也不该 sys.exit：一个叫 find/load 的函数不终止进程，由调用方决定怎么处理
+        # （本函数 docstring 与 load_backup() 的契约都是这个口径）。
         print(f"❌ 前缀 {tag} 匹配到多个备份，请写得更具体：")
         for h in hits:
             print(f"   {h.name}")
-        sys.exit(1)
+        return None, "ambiguous"
     return None, "notfound"
 
 
@@ -1408,19 +1520,151 @@ def _warn_backup_root_mismatch(backup_root, matched_root):
 
 
 
-def _report_rollback(problems, ok_text: str):
-    """回滚收尾：没做到的步骤如实列出，不要无条件报成功
+def _backup_file_path(bp: Path, group: str, entry: dict):
+    """备份里某个正文文件的实际路径（6 个还原点 + 缺件检查 + 单测共用这一个判据）。
+
+    v3 布局按 `{slug}/{name}` 存（meta 记 `rel`）；v2 及更早是平铺 `name`。
+    返回 `None` 表示这条 meta 记录不可用，调用方必须跳过并记账：
+      · 既无 `rel` 也无 `name`（手改 meta / 半截备份）
+      · `rel` 是绝对路径、带盘符、或含 `..`（会越出备份目录）
+      · `rel` 解析出来是目录：`.` / `./` / `slug/` / 单段 `slug`
+    ⚠️ 绝不能退化成 `bp / group`（组目录）或 `bp / group / <slug>`：
+    它们 `.exists()` 为真且是目录，safe_copy 会**先删 `f["path"]` 再 copytree**，
+    把整个备份目录覆盖过去。空 rel 与「rel 解析成目录」是同一族缺陷；
+    缺件检查看到目录存在不会报警，所以尤其静默。
+
+    判据来自备份侧的形状：v3 的 `rel` 由 `f.relative_to(projects_dir).as_posix()`
+    生成，必然是规范化的**多段**路径；v2 的 `name` 必然是**单段**文件名。
+    `is_dir=True` 的合法目录条目（tool-results）是两段式 `slug/sid`，不受影响——
+    本来就要把整个目录还原回去。
+    写侧由 `_sanitize_restore_paths()` 管 `path` / `copied_to`，这里管读侧 `rel`，两者互补。
+    """
+    if not isinstance(entry, dict):
+        return None
+    rel = entry.get("rel") or entry.get("name")
+    if not isinstance(rel, str) or not rel or "\x00" in rel:
+        return None
+    rp = Path(rel)
+    norm = rel.replace("\\", "/")
+    if (rp.is_absolute() or rp.drive or rp.root
+            or ntpath.isabs(rel) or posixpath.isabs(rel)
+            or ".." in norm.split("/")):
+        return None
+    # 规范化检查：'.' / './' / 尾斜杠 / './x' / 双斜杠 都不是 as_posix() 的形态
+    if rp.name in ("", ".", "..") or rp.as_posix() != norm:
+        return None
+    parts = norm.split("/")
+    if entry.get("rel"):
+        if len(parts) < 2:          # v3 的 rel 必须带 slug 目录，单段只会指向整个 slug 目录
+            return None
+    elif len(parts) != 1:           # v2 平铺的 name 只能是单段文件名
+        return None
+    return bp / group / rel
+
+
+def _backup_entry_invalid_msg(entry) -> str:
+    """6 个还原循环与缺件检查共用同一条文案，避免同一条目被记两遍。"""
+    return (f"备份条目不可用（缺 name/rel / 缺还原目标，"
+            f"或 rel 越界 / 形状不合法），已跳过：{entry}")
+
+
+def _sanitize_restore_paths(meta: dict, roots, problems: list):
+    """把 meta 里越界的还原 / 删除路径剔除（备份被搬运或手改后的写侧护栏）。
+
+    roots 必须是「src_ep 根 + dst_ep 根 + 备份目录自身」三者：
+    跨版本迁移时 `path` 落在**另一个** edition 根下，只给一个根会误剔正常条目
+    ——这正是首次启用失败的原因。两侧统一 `resolve()` 对齐符号链接与大小写；
+    Windows 8.3 短名不依赖展开，靠 `parents` 的结构化比较 + 双形态兜底处理。
+    包含关系不能用字符串 `startswith`，否则 `<root>2` 这类同前缀目录会被误放行。
+
+    覆盖三组正文条目（dict，含 `path`）与 `copied_to`（字符串列表，回滚会删它）。
+    越界条目从 meta 剔除，后续还原 / 清理循环自然跳过；同时记账让收尾如实反映。
+    """
+    resolved = []
+    for r in roots:
+        try:
+            resolved.append(Path(r).resolve())
+        except (OSError, ValueError):
+            continue
+
+    def _inside(raw) -> bool:
+        try:
+            pp = Path(raw).resolve()
+        except (OSError, ValueError, TypeError):
+            return False
+        # 再补一份未经 resolve 的 abspath 形态：roots 与 path 同为短名写法时
+        # 它仍可对齐；短名不展开也不影响 parents 的结构化比较。
+        # 任一形态落在 roots 内即放行（宁可多还原一个合法文件，不可少还原）。
+        try:
+            alt = Path(os.path.abspath(str(raw)))
+        except (OSError, ValueError, TypeError):
+            alt = pp
+        for cand in (pp, alt):
+            if any(cand == r or r in cand.parents for r in resolved):
+                return True
+        return False
+
+    for key in ("src_files", "dst_files", "override_files"):
+        items = meta.get(key) or []
+        kept = []
+        for f in items:
+            if isinstance(f, dict) and f.get("path") and not _inside(str(f["path"])):
+                problems.append(f"还原路径不在数据目录内，已跳过：{f['path']}")
+                continue
+            kept.append(f)
+        meta[key] = kept
+
+    copied = meta.get("copied_to") or []
+    kept = []
+    for rel in copied:
+        # 非字符串会在回滚的 Path(rel) 处 TypeError 崩在半途（同样是手改 meta 可达）
+        if not isinstance(rel, str) or not rel:
+            problems.append(f"清理路径不是有效字符串，已跳过：{rel!r}")
+            continue
+        if not _inside(rel):
+            problems.append(f"清理路径不在数据目录内，已跳过：{rel}")
+            continue
+        kept.append(rel)
+    meta["copied_to"] = kept
+
+
+def _check_backup_files_present(bp: Path, meta: dict, problems: list):
+    """三组正文备份是否齐全；缺件与不可用条目都要记账。
+
+    full 与 precise 两条回滚都要调：full 在更早的地方就 return 了，
+    漏掉它就会出现「整库回滚完成 ✅」但目标侧正文没回来。
+    两条分支都在各自还原循环**之后**调用，所以循环里仍要有 None 守卫；
+    这里用同一条文案去重，用户只会看到一条告警。
+    """
+    for _grp, _key in (("files", "src_files"),
+                       ("dst_files", "dst_files"),
+                       ("override_files", "override_files")):
+        for _f in (meta.get(_key) or []):
+            srcf = _backup_file_path(bp, _grp, _f)
+            if srcf is None:
+                _msg = _backup_entry_invalid_msg(_f)
+                if _msg not in problems:
+                    problems.append(_msg)
+                continue
+            if not srcf.exists():
+                problems.append(f"备份缺少 {srcf.relative_to(bp)}")
+
+
+def _report_rollback(problems, ok_text: str) -> bool:
+    """回滚收尾：没做到的步骤如实列出，返回是否全部完成
 
     半回滚是最难排查的状态 —— 用户以为已经干净了，然后在这个基础上继续操作。
+    调用方拿到 False 必须以非零退出，否则自动化会把半回滚当成功。
     """
     if not problems:
         print(f"\n  ✅ {ok_text}")
-        return
+        return True
     print(f"\n  ⚠️  回滚未完全完成，以下步骤没做到：")
     for i, p in enumerate(problems, 1):
         print(f"     {i}. {p}")
     print("     常见原因是文件仍被 WorkBuddy 客户端 / 索引服务占用，")
     print("     或目标路径被设为只读。关掉客户端后重跑同一条 --rollback 命令即可续做（幂等）。")
+    return False
 
 
 def _load_backup_json(path: Path, problems, what: str):
@@ -1431,7 +1675,14 @@ def _load_backup_json(path: Path, problems, what: str):
     "还能怎么办"。损坏时把这一步记为未完成，由收尾汇总统一告知。
     """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # 备份侧用 __b64__ 存 BLOB；不解码就把 dict 交给 sqlite 会 InterfaceError。
+        # 非 dict 不能原样返回：6 个调用点一律 .keys()，会在回滚中途抛 AttributeError
+        if not isinstance(data, dict):
+            print(f"  ⚠️  备份文件 {path.name} 顶层不是对象，已跳过")
+            problems.append(f"{what}（{path.name} 顶层不是对象）")
+            return None
+        return _revive_blobs(data)
     except (OSError, ValueError) as e:
         print(f"  ⚠️  备份文件 {path.name} 无法读取（{e}）")
         problems.append(f"{what}（{path.name} 无法读取）")
@@ -1450,6 +1701,10 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             print(f"❌ 备份标签不合法：{tag!r}")
             print("   标签只能是备份目录名（如 20260921153000_domestic2intl_12345678），"
                   "不能包含路径分隔符")
+        elif reason == "ambiguous":
+            # 候选列表 find_backup 已经打印过了，这里只收尾 ——
+            # 再说一句「找不到备份」会自相矛盾
+            print(f"❌ 备份标签 {tag} 有歧义（匹配到多个备份），请写得更具体")
         else:
             print(f"❌ 找不到备份: {tag}")
             print("   可用 --backups 查看")
@@ -1462,6 +1717,13 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
     meta_file = bp / "meta.json"
     try:
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            print(f"❌ 备份 {bp.name} 的 meta.json 顶层不是对象，无法回滚")
+            sys.exit(1)
+        # 只对「比自己新」的布局提示：本版自己产的 v3 备份不该每次回滚都刷这句
+        if isinstance(meta.get("version"), int) and meta["version"] > BACKUP_META_VERSION:
+            print(f"  ⚠️  备份布局版本 {meta['version']} 高于本工具支持的 {BACKUP_META_VERSION}；"
+                  "请升级工具后再回滚，否则正文可能找不到")
     except (OSError, ValueError) as e:
         print(f"❌ 备份 {bp.name} 的 meta.json 无法解析：{e}")
         print("   回滚必须知道「从哪个版本迁到哪个版本、迁的是哪条对话」，这些都存在 meta.json 里，")
@@ -1473,7 +1735,12 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         sys.exit(1)
     # 两个工具的备份格式不同：migrate.py 的整账号备份没有 from_edition / kind，
     # 拿来跑单对话回滚会直接 KeyError traceback
-    if not meta.get("from_edition") or not str(meta.get("kind", "")).startswith("session"):
+    _kind = str(meta.get("kind", ""))
+    if _kind == "project_import":
+        print(f"❌ {bp.name} 是跨设备项目导入的备份，不是单对话迁移的备份")
+        print("   回滚请用：python3 scripts/migrate_project.py --rollback <TAG>")
+        sys.exit(1)
+    if not meta.get("from_edition") or not _kind.startswith("session"):
         print(f"❌ {bp.name} 不是单对话迁移的备份（很可能是 migrate.py 的整账号备份）")
         print("   整账号回滚请用：python3 scripts/migrate.py --rollback <TAG>")
         print("   单对话备份请用：python3 scripts/migrate_session.py --backups 查看")
@@ -1512,24 +1779,49 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
                   f"{src_ep.label} 不在还原范围内。")
     if not assume_yes and not ask_yes_no("  确认回滚？(y/N): "):
         print("已取消")
-        return
+        _STATE["cancelled"] = True
+        # 返回 False：main() 据此以非零退出，自动化才能区分「取消」与「回滚成功」
+        return False
 
     # 回滚里凡是「可能失败但不能崩栈」的步骤都往这里记一笔，由收尾汇总统一告知。
     # 以前不管有没有做到都打「✅ 回滚完成」，半回滚态最难排查，假话代价太高。
     rollback_problems = []
 
+    # 写侧护栏：meta 里的 path / copied_to 都是绝对路径，备份被搬运或手改后
+    # 不能让回滚写到任意位置。roots 同时给两个 edition 根（跨版本迁移的 path
+    # 属于另一个根）与备份自身；必须放在任何写操作之前。
+    _sanitize_restore_paths(meta, (src_ep.root, dst_ep.root, bp), rollback_problems)
+
     if full:
-        restored = False
+        # 先检查需要的快照是否齐全，缺一个就不开始恢复：
+        # 否则会出现「一侧已回滚、另一侧停在迁移后」的半回滚，库与正文不一致。
+        # 同版本迁移只生成 snapshot_src.db（两库是同一个），不能要求 dst。
+        _same_db = (src_ep.db == dst_ep.db)
+        _needed = []
         for snapshot, ep in (("snapshot_src.db", src_ep), ("snapshot_dst.db", dst_ep)):
-            if ep is src_ep and not _restore_src_side:
-                print(f"  ⏭️  copy 模式：{src_ep.label} 未被本次迁移改动，跳过 {snapshot}")
+            if snapshot == "snapshot_dst.db" and _same_db:
                 continue
+            if ep.db == src_ep.db and not _restore_src_side:
+                continue
+            _needed.append((snapshot, ep))
+        _missing = [f"{ep.label}（{sn}）" for sn, ep in _needed if not (bp / sn).exists()]
+        if _missing:
+            print(f"  ❌ 备份里缺少 {len(_missing)} 个整库快照：{'、'.join(_missing)}")
+            print("     未开始回滚（数据库与文件都未改动），请换一个完整备份。")
+            sys.exit(1)
+
+        restored = False
+        for snapshot, ep in _needed:
             f = bp / snapshot
             if not f.exists():
                 continue
-            # 覆盖前先把"当前库"另存一份，回滚后发现问题还有得救
+            # 覆盖前先把"当前库"另存一份，回滚后发现问题还有得救。
+            # 这份保护快照失败就不能继续：覆盖之后再也回不到当前状态了。
             if ep.db.exists():
-                snapshot_db(ep.db, bp / ("prefull_" + ep.name + ".db"))
+                if not snapshot_db(ep.db, bp / ("prefull_" + ep.name + ".db")):
+                    print(f"  ❌ 无法为当前 {ep.label} 库创建保护快照，已中止 --full 回滚。")
+                    print("     保护快照失败时继续覆盖，出问题就再也回不到当前状态。")
+                    sys.exit(1)
             # 必须先清 -wal / -shm：只覆盖主库的话，SQLite 下次打开会把
             # 与新主库不匹配的旧 WAL 重放上去，整库恢复等于白做。
             # 清理失败（客户端仍持句柄）时不能硬着头皮覆盖主库。
@@ -1537,7 +1829,14 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
                 print(f"  ❌ 未清理 {ep.db.name} 的 -wal / -shm，继续覆盖会让整库恢复失效，已中止。")
                 print("     请关闭 WorkBuddy 客户端后重新执行 --rollback --full")
                 sys.exit(1)
-            shutil.copy2(str(f), str(ep.db))
+            try:
+                shutil.copy2(str(f), str(ep.db))
+            except OSError as e:
+                # 这一行前刚删掉 -wal/-shm：覆盖失败若裸抛 OSError，顶层收不到，
+                # 用户只会看到 traceback，连「重跑续做」的提示都没有
+                print(f"  ❌ 覆盖 {ep.db.name} 失败（{e}）：数据库可能停在半还原状态。")
+                print(f"     可重跑同一条 --rollback 续做；或从 {bp / snapshot} 手动恢复。")
+                return False
             print(f"  ✅ 已整库恢复 {ep.label}")
             restored = True
 
@@ -1557,25 +1856,51 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         # 文件层面也要回到迁移前：否则"整库回滚"名不副实（库回来了、正文还在目标侧）
         for rel in meta.get("copied_to", []):
             p = Path(rel)
-            if p.exists() and remove_path(p):
+            if not p.exists():
+                continue
+            if remove_path(p):
                 print(f"  ✅ 已删除 {p.name}")
+            else:
+                # 删不掉必须记账：否则收尾照样打印「整库回滚完成」
+                rollback_problems.append(f"删除 {p.name}")
         if _restore_src_side:
             for f in meta.get("src_files", []):
-                srcf = bp / "files" / f["name"]
+                srcf = _backup_file_path(bp, "files", f)
+                if srcf is None or not f.get("name") or not f.get("path"):
+                    _msg = _backup_entry_invalid_msg(f)
+                    if _msg not in rollback_problems:
+                        rollback_problems.append(_msg)
+                    continue
                 if srcf.exists() and safe_copy(srcf, Path(f["path"])):
                     print(f"  ✅ 已还原源文件 {f['name']}")
+                elif srcf.exists():
+                    rollback_problems.append(f"还原源文件 {f['name']}")
         elif meta.get("src_files"):
             print(f"  ⏭️  copy 模式：{len(meta['src_files'])} 个源侧正文文件未被删除，跳过还原")
         # 覆盖路径必须还原目标侧的原有文件：硬冲突/软冲突覆盖后只删 copied_to 的话，
         # 库行从快照回来了，目标 jsonl 却被删且没还原 → "对话行在、正文空"
         for f in meta.get("dst_files", []):
-            srcf = bp / "dst_files" / f["name"]
+            srcf = _backup_file_path(bp, "dst_files", f)
+            if srcf is None or not f.get("name") or not f.get("path"):
+                _msg = _backup_entry_invalid_msg(f)
+                if _msg not in rollback_problems:
+                    rollback_problems.append(_msg)
+                continue
             if srcf.exists() and safe_copy(srcf, Path(f["path"])):
                 print(f"  ✅ 已还原目标原有文件 {f['name']}")
+            elif srcf.exists():
+                rollback_problems.append(f"还原目标原有文件 {f['name']}")
         for f in meta.get("override_files", []):
-            srcf = bp / "override_files" / f["name"]
+            srcf = _backup_file_path(bp, "override_files", f)
+            if srcf is None or not f.get("name") or not f.get("path"):
+                _msg = _backup_entry_invalid_msg(f)
+                if _msg not in rollback_problems:
+                    rollback_problems.append(_msg)
+                continue
             if srcf.exists() and safe_copy(srcf, Path(f["path"])):
                 print(f"  ✅ 已还原被覆盖的旧对话文件 {f['name']}")
+            elif srcf.exists():
+                rollback_problems.append(f"还原被覆盖的旧对话文件 {f['name']}")
         if meta.get("tasks_copied"):
             dt = dst_ep.tasks_dir / sid
             if dt.exists():
@@ -1600,8 +1925,10 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
                     print("  ✅ 已还原源侧任务数据")
                 else:
                     rollback_problems.append("还原源侧任务数据")
-        _report_rollback(rollback_problems, "整库回滚完成（库 + 正文 + 任务数据）")
-        return
+        _check_backup_files_present(bp, meta, rollback_problems)
+        if not _report_rollback(rollback_problems, "整库回滚完成（库 + 正文 + 任务数据）"):
+            sys.exit(1)
+        return True
 
     # 同版本迁移：回滚就是把 user_id 改回去
     if meta.get("kind") == "session_intra":
@@ -1628,8 +1955,9 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         if n != 1:
             rollback_problems.append(
                 f"把 {sid[:8]}… 的 user_id 改回 {str(meta.get('source_user_id', ''))[:12]}…")
-        _report_rollback(rollback_problems, "回滚完成")
-        return
+        if not _report_rollback(rollback_problems, "回滚完成"):
+            sys.exit(1)
+        return True
 
     # 同版本克隆：只删掉克隆出来的那条新对话，绝对不能碰原始对话
     # （通用回滚会按 session_id 删行，而这里的 session_id 就是原始对话的 id，
@@ -1637,13 +1965,15 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
     if meta.get("kind") == "session_clone":
         new_sid = meta.get("new_session_id", "")
         if not new_sid:
-            print("  ⚠️  备份缺少 new_session_id，无法定位克隆产物，跳过")
-            return
+            print("  ❌ 备份缺少 new_session_id，无法定位克隆产物；"
+                  "请手动检查该备份的 meta.json")
+            return False
         conn = connect_rw(dst_ep.db)
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("DELETE FROM sessions WHERE id = ?", (new_sid,))
-            conn.execute("DELETE FROM session_usage WHERE session_id = ?", (new_sid,))
+            if _has_usage_table(conn):
+                conn.execute("DELETE FROM session_usage WHERE session_id = ?", (new_sid,))
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             print(f"  ✅ 已删除克隆出的对话 {new_sid[:8]}…")
@@ -1663,43 +1993,69 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
                     print("  ✅ 已删除克隆的任务数据")
                 else:
                     rollback_problems.append("删除克隆的任务数据")
-        _report_rollback(rollback_problems, "回滚完成（原始对话未受影响）")
-        return
+        if not _report_rollback(rollback_problems, "回滚完成（原始对话未受影响）"):
+            sys.exit(1)
+        return True
 
     # 精确回滚
     # 1) 目标侧：删除写入的行与文件，恢复被覆盖的原行/原文件
     conn = connect_rw(dst_ep.db)
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        if meta.get("target_existed") and (bp / "dst_session.json").exists():
-            row = _load_backup_json(bp / "dst_session.json", rollback_problems,
-                                    "恢复目标原有 session 行")
-            if row:
-                cols = [c for c in row.keys() if c in table_columns(conn, "sessions")]
-                conn.execute(
-                    f"INSERT OR REPLACE INTO sessions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [row[c] for c in cols],
-                )
-                print("  ✅ 已恢复目标原有 session 行")
+        # 目标行是否**真的**被还原（不只是备份文件在）：驱动下面要不要删 usage
+        _target_row_restored = False
+        if meta.get("target_existed"):
+            if (bp / "dst_session.json").exists():
+                row = _load_backup_json(bp / "dst_session.json", rollback_problems,
+                                        "恢复目标原有 session 行")
+                if row:
+                    cols = [c for c in row.keys() if c in table_columns(conn, "sessions")]
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO sessions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                        [row[c] for c in cols],
+                    )
+                    _target_row_restored = True
+                    print("  ✅ 已恢复目标原有 session 行")
+                else:
+                    # 备份损坏，恢复不了；目标行已经迁过来了，删掉等于连原件一起丢，
+                    # 所以保持现状并由收尾汇总告知
+                    rollback_problems.append("恢复目标原有 session 行（备份损坏，已保留迁移后的行）")
+                    print("  ⚠️  目标原有 session 行未能恢复（备份不可用，已保留迁移后的行）")
             else:
-                # 备份损坏，恢复不了；目标行已经迁过来了，删掉等于连原件一起丢，
-                # 所以保持现状并由收尾汇总告知
-                print("  ⚠️  目标原有 session 行未能恢复（备份不可用，已保留迁移后的行）")
+                # target_existed=True 但 dst_session.json 缺失：原行只存在于整库快照里
+                # （不跑 --full 不会还原）。此时 DELETE 会把目标侧直接清空 —— 不能删。
+                rollback_problems.append("恢复目标原有 session 行（备份缺失，已保留迁移后的行）")
+                print("  ⚠️  备份里缺少 dst_session.json，无法还原目标原有行；")
+                print("     已保留迁移后的行（删掉它等于把目标侧清空）。可改用 --full 回滚。")
         else:
             conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
             print("  ✅ 已删除目标侧的 session 行")
 
-        conn.execute("DELETE FROM session_usage WHERE session_id = ?", (sid,))
+        # 保留目标行时不能删 usage，否则留下「行在、用量没了」的孤儿。
+        # 判据是「原行是否真的还原」，不是「备份文件在不在」——文件在但损坏时
+        # 同样保留迁移后的行，那时删 usage 一样会造孤儿。
+        _keep_target = bool(meta.get("target_existed")) and not _target_row_restored
+        if _has_usage_table(conn) and not _keep_target:
+            conn.execute("DELETE FROM session_usage WHERE session_id = ?", (sid,))
+        elif _keep_target:
+            rollback_problems.append("目标行已保留，其 session_usage 未删除（避免孤儿）")
         if (bp / "dst_usage.json").exists():
             u = _load_backup_json(bp / "dst_usage.json", rollback_problems,
                                   "恢复目标原有 session_usage")
-            cols = ([c for c in u.keys() if c in table_columns(conn, "session_usage")]
-                    if u else [])
-            if cols:
-                conn.execute(
-                    f"INSERT OR REPLACE INTO session_usage ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [u[c] for c in cols],
-                )
+            if u:
+                if not _has_usage_table(conn):
+                    print("  ℹ️  目标库没有 session_usage 表，用量记录未恢复")
+                    rollback_problems.append("目标库没有 session_usage 表，用量记录未恢复")
+                else:
+                    cols = [c for c in u.keys() if c in table_columns(conn, "session_usage")]
+                    if cols:
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO session_usage ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                            [u[c] for c in cols],
+                        )
+                    else:
+                        print("  ℹ️  备份的用量列与目标表无交集，用量记录未恢复")
+                        rollback_problems.append("用量列与目标表无交集，未恢复")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
@@ -1724,20 +2080,29 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             if uf.exists():
                 u = _load_backup_json(uf, rollback_problems,
                                       "恢复其 session_usage")
-                ucols = ([c for c in u.keys() if c in table_columns(conn, "session_usage")]
-                         if u else [])
-                if ucols:
-                    conn.execute(
-                        f"INSERT OR REPLACE INTO session_usage ({','.join(ucols)}) "
-                        f"VALUES ({','.join('?' * len(ucols))})",
-                        [u[c] for c in ucols],
-                    )
-                    conn.commit()
-                    print(f"  ✅ 已恢复其 session_usage")
+                if u:
+                    if not _has_usage_table(conn):
+                        print("  ℹ️  目标库没有 session_usage 表，用量记录未恢复")
+                        rollback_problems.append("目标库没有 session_usage 表，用量记录未恢复")
+                    else:
+                        ucols = [c for c in u.keys() if c in table_columns(conn, "session_usage")]
+                        if ucols:
+                            conn.execute(
+                                f"INSERT OR REPLACE INTO session_usage ({','.join(ucols)}) "
+                                f"VALUES ({','.join('?' * len(ucols))})",
+                                [u[c] for c in ucols],
+                            )
+                            conn.commit()
+                            print(f"  ✅ 已恢复其 session_usage")
         finally:
             conn.close()
         for f in meta.get("override_files", []):
-            srcf = bp / "override_files" / f["name"]
+            srcf = _backup_file_path(bp, "override_files", f)
+            if srcf is None or not f.get("name") or not f.get("path"):
+                _msg = _backup_entry_invalid_msg(f)
+                if _msg not in rollback_problems:
+                    rollback_problems.append(_msg)
+                continue
             if srcf.exists():
                 if safe_copy(srcf, Path(f["path"])):
                     print(f"  ✅ 已还原 {f['name']}")
@@ -1754,7 +2119,12 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             else:
                 rollback_problems.append(f"删除目标侧残留文件 {p.name}")
     for f in meta.get("dst_files", []):
-        srcf = bp / "dst_files" / f["name"]
+        srcf = _backup_file_path(bp, "dst_files", f)
+        if srcf is None or not f.get("name") or not f.get("path"):
+            _msg = _backup_entry_invalid_msg(f)
+            if _msg not in rollback_problems:
+                rollback_problems.append(_msg)
+            continue
         if srcf.exists():
             if safe_copy(srcf, Path(f["path"])):
                 print(f"  ✅ 已还原 {f['name']}")
@@ -1777,13 +2147,17 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             if (bp / "src_usage.json").exists():
                 u = _load_backup_json(bp / "src_usage.json", rollback_problems,
                                       "恢复源侧 session_usage")
-                ucols = ([c for c in u.keys() if c in table_columns(conn, "session_usage")]
-                         if u else [])
-                if ucols:
-                    conn.execute(
-                        f"INSERT OR REPLACE INTO session_usage ({','.join(ucols)}) VALUES ({','.join('?' * len(ucols))})",
-                        [u[c] for c in ucols],
-                    )
+                if u:
+                    if not _has_usage_table(conn):
+                        print("  ℹ️  源库没有 session_usage 表，用量记录未恢复")
+                        rollback_problems.append("源库没有 session_usage 表，用量记录未恢复")
+                    else:
+                        ucols = [c for c in u.keys() if c in table_columns(conn, "session_usage")]
+                        if ucols:
+                            conn.execute(
+                                f"INSERT OR REPLACE INTO session_usage ({','.join(ucols)}) VALUES ({','.join('?' * len(ucols))})",
+                                [u[c] for c in ucols],
+                            )
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if row:
@@ -1792,7 +2166,12 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
             conn.close()
 
         for f in meta.get("src_files", []):
-            srcf = bp / "files" / f["name"]
+            srcf = _backup_file_path(bp, "files", f)
+            if srcf is None or not f.get("name") or not f.get("path"):
+                _msg = _backup_entry_invalid_msg(f)
+                if _msg not in rollback_problems:
+                    rollback_problems.append(_msg)
+                continue
             if srcf.exists():
                 if safe_copy(srcf, Path(f["path"])):
                     print(f"  ✅ 已还原源文件 {f['name']}")
@@ -1823,7 +2202,11 @@ def rollback(tag, backup_root=None, full=False, assume_yes=False):
         else:
             rollback_problems.append("还原目标侧原有任务数据")
 
-    _report_rollback(rollback_problems, "精确回滚完成（未影响其他对话）")
+    _check_backup_files_present(bp, meta, rollback_problems)
+
+    if not _report_rollback(rollback_problems, "精确回滚完成（未影响其他对话）"):
+        sys.exit(1)
+    return True
 
 
 def list_backups(backup_root=None):
@@ -1846,7 +2229,13 @@ def list_backups(backup_root=None):
                 # 而 --rollback 又会提示「meta.json 无法解析」，两边说法对不上
                 broken.append((d.name, f"{type(e).__name__}: {e}"))
                 continue
-            if not str(meta.get("kind", "")).startswith("session"):
+            _kind = str(meta.get("kind", ""))
+            if _kind == "project_import":
+                # 跨设备项目导入的备份：也不是本脚本的格式，别把它说成整账号备份
+                print(f"  ℹ️  {d.name} 是跨设备项目导入的备份，回滚请用："
+                      f"python3 scripts/migrate_project.py --rollback {d.name}")
+                continue
+            if not _kind.startswith("session"):
                 # migrate.py 的整账号备份：格式不同，回滚要走另一个脚本
                 foreign.append(d.name)
                 continue
@@ -1856,7 +2245,6 @@ def list_backups(backup_root=None):
         print(f"  ⚠️  备份 {_name} 的 meta.json 无法解析（{_err}），无法精确回滚")
     for _name in foreign:
         print(f"  ℹ️  {_name} 是整账号备份，回滚请用：python3 scripts/migrate.py --rollback {_name}")
-
 
     if not found:
         print("（暂无单对话迁移备份）")
@@ -1899,17 +2287,31 @@ def ask_conflict(src: SessionInfo, dst: SessionInfo, kind: str, assume_yes=False
     print(render_diff(src, dst, kind))
     print()
 
-    if assume_yes:
-        # 非交互模式：无法向用户提问，一律保守处理
-        if default == "overwrite":
-            print("  → --on-conflict=overwrite，直接覆盖")
-            return "overwrite"
-        if default == "newer":
-            # 严格大于才算「源更新」：秒级时间戳相同时按 overwrite 处理会误覆盖
-            return "overwrite" if src.effective_last_ts > dst.effective_last_ts else "skip"
-        # ask / skip：没有 TTY 可供询问，降级为跳过（不覆盖用户已有数据）
-        print("  → 非交互模式无法询问（--on-conflict=ask 已降级为 skip），跳过该对话")
+    # 显式策略优先，但要区分两种冲突的后果：
+    #   · id 冲突：覆盖的是同一行，无歧义，直接按策略走
+    #   · title 冲突：overwrite/newer 会 **删掉本机另一条同标题对话**（数据丢失），
+    #     不能只凭 --on-conflict 就跳过确认 —— 必须 --yes 明确授权，否则逐条询问
+    if default == "overwrite" and (kind == "id" or assume_yes):
+        print("  → --on-conflict=overwrite，直接覆盖")
+        return "overwrite"
+    if default == "newer" and (kind == "id" or assume_yes):
+        # 严格大于才算「源更新」：秒级时间戳相同时按 overwrite 处理会误覆盖
+        _newer = src.effective_last_ts > dst.effective_last_ts
+        # 决策必须可见：move 模式下「覆盖」会删源，用户需要看到依据
+        print(f"  → --on-conflict=newer：源 {'较新' if _newer else '非较新'}"
+              f"（{src.effective_last_ts} vs {dst.effective_last_ts}），"
+              f"{'覆盖' if _newer else '跳过'}")
+        return "overwrite" if _newer else "skip"
+    if default == "skip":
+        print("  → --on-conflict=skip，跳过该对话")
         return "skip"
+    if assume_yes:
+        print("  → 已指定 --yes，按跳过处理")
+        return "skip"
+    if default == "overwrite":
+        print("  → --on-conflict=overwrite 会删除本机这条同标题对话，需逐条确认")
+    elif default == "newer":
+        print("  → --on-conflict=newer 会删除本机这条同标题对话，需逐条确认")
 
     if kind == "id":
         prompt = "  请确认 [y] 覆盖 / [n] 不操作（取消）: "
@@ -1942,13 +2344,15 @@ def do_migrate(src_ep, dst_ep, sid, mode="move", on_conflict="ask",
     sid = src_row["id"]
 
     if src_ep.name == dst_ep.name and src_ep.db == dst_ep.db:
-        return _migrate_intra(src_ep, src_row, target_uid, dry_run, assume_yes, mode)
+        return _migrate_intra(src_ep, src_row, target_uid, dry_run, assume_yes, mode,
+                              backup_root=backup_root)
 
     return _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
                           dry_run, assume_yes, target_uid, backup_root)
 
 
-def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
+def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move",
+                   backup_root=None):
     """同版本迁移，三种语义：
 
     1) copy（--mode copy）：无论源属于哪个账号，都克隆出一条新对话，源保持不动
@@ -1966,6 +2370,10 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
             _warn_weak_target_uid(how)
     if not target_uid:
         print("❌ 无法确定目标 user_id，请加 --target-uid 指定")
+        if dry_run:
+            # dry-run 也必须有目标账号：走 copy 还是 clone、写到哪个 uid 全由它决定，
+            # 拿它当占位符"预览"出来的计划是假的，不如直接说清楚
+            print("   （dry-run 同样需要目标账号：它决定 copy / clone 语义与写入的 uid）")
         sys.exit(1)
 
     sid = src_row["id"]
@@ -1978,23 +2386,26 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
     if mode == "copy":
         # copy 的核心承诺是"源不动"：跨账号时也一样，克隆到目标账号而不是改归属
         print("\n  ℹ️  --mode copy：保留源对话，改为克隆一份归属到目标账号")
-        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes)
+        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes,
+                                backup_root=backup_root)
     if old_uid == target_uid:
         # 归属无需变更：真正的诉求是复制一份，交给克隆逻辑处理
         print("\n  ℹ️  该对话已属于当前账号，无归属可改 → 按「同版本复制」处理")
-        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes)
+        return _clone_intra(ep, src_row, target_uid, dry_run, assume_yes,
+                                backup_root=backup_root)
     if dry_run:
         print("\n  [dry-run] UPDATE sessions SET user_id=? WHERE id=?")
         return
     if not assume_yes and not ask_yes_no("\n确认迁移？(y/N): "):
         print("已取消")
+        _STATE["cancelled"] = True
         return
 
     # 同版本迁移同样必须备份，否则改完 user_id 无法回滚
     # kind 一次写定：建完再改的话，两次写之间中断会让回滚走通用分支，
     # 同库场景下反而把还没动过的原对话行删掉
     bp = create_backup(
-        ep, ep, src_row, None, sid, "intra", None,
+        ep, ep, src_row, None, sid, "intra", backup_root,
         kind="session_intra",
         extra_meta={"source_user_id": old_uid, "target_user_id": target_uid},
     )
@@ -2023,7 +2434,14 @@ def _migrate_intra(ep, src_row, target_uid, dry_run, assume_yes, mode="move"):
     finally:
         conn.close()
     print()
-    _report_verify("完成（user_id 已改到目标账号）", n)
+    if not _report_verify("完成（user_id 已改到目标账号）", n):
+        # 这一支理论上不可达（commit 前已用 rowcount 拦过）。真发生时 UPDATE
+        # 已经提交，说「已中止」与事实不符；改成给回滚标签，别让用户无路可走。
+        print(f"  ⚠️  验证未通过，但 UPDATE 已提交；请执行回滚：")
+        print(f"     python3 scripts/migrate_session.py --rollback {bp.name}")
+        # 必须非零退出：do_migrate 的调用方不接收返回值，return 会被丢掉，
+        # 自动化就会把「验证未通过、请回滚」当成成功
+        sys.exit(1)
     print(f"  回滚: python3 scripts/migrate_session.py --rollback {bp.name}")
 
 
@@ -2115,7 +2533,7 @@ def _rewrite_tree_ids(path: Path, old_sid: str, new_sid: str):
                 _rewrite_session_id(inner, old_sid, new_sid)
 
 
-def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes):
+def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes, backup_root=None):
     """同版本内克隆一条对话：新 id + 复制正文（改写 sessionId）+ 任务数据 + 工具结果"""
     sid = src_row["id"]
     new_sid = str(uuid.uuid4())
@@ -2142,11 +2560,12 @@ def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes):
 
     if not assume_yes and not ask_yes_no(f"\n确认在{ep.label}内复制出一份？(y/N): "):
         print("已取消")
+        _STATE["cancelled"] = True
         return
 
     # 备份仍以源 id 为准；kind=session_clone 让回滚只删克隆产物、不动原始对话
     bp = create_backup(
-        ep, ep, src_row, None, sid, "copy", None,
+        ep, ep, src_row, None, sid, "copy", backup_root,
         kind="session_clone",
         extra_meta={
             "new_session_id": new_sid,
@@ -2195,7 +2614,12 @@ def _clone_intra(ep, src_row, target_uid, dry_run, assume_yes):
     finally:
         conn.close()
     print()
-    _report_verify("新 session 行已写入", n)
+    if not _report_verify("新 session 行已写入", n):
+        # 与 _migrate_intra 同范式：commit 已执行，不能说「已中止」，
+        # 必须给出备份标签；返回值没人消费，直接非零退出
+        print("  ⚠️  验证未通过，但 INSERT 已提交；请执行回滚：")
+        print(f"     python3 scripts/migrate_session.py --rollback {bp.name}")
+        sys.exit(1)
 
     # 正文文件：文件名换成新 id；jsonl 内部的 sessionId 也要跟着换
     print("\n📄 复制对话正文...")
@@ -2318,6 +2742,7 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             decision = ask_conflict(src_info, dst_info, "id", assume_yes, on_conflict)
             if decision == "cancel":
                 print("\n已取消，未做任何改动")
+                _STATE["cancelled"] = True
                 return
             if decision == "skip":
                 print("\n已跳过该对话")
@@ -2344,6 +2769,7 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
                 decision = ask_conflict(src_info, d_info, "title", assume_yes, on_conflict)
                 if decision == "cancel":
                     print("\n已取消，未做任何改动")
+                    _STATE["cancelled"] = True
                     return
                 if decision == "skip":
                     print("\n已跳过该对话（源与目标均未改动）")
@@ -2388,6 +2814,7 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
     if not assume_yes and decision != "overwrite":
         if not ask_yes_no("\n确认执行？(y/N): "):
             print("已取消")
+            _STATE["cancelled"] = True
             return
 
     # 备份
@@ -2415,6 +2842,18 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             elif c == "id":
                 v = sid
             values.append(v)
+        # 目标表可能比源表多列（版本漂移：43 列 vs 30 列）。INSERT OR REPLACE 是
+        # 「先删后插」，不填这些列会把目标原行的值重置成 NULL/默认值 ——
+        # 用户改过的 custom_title 之类会静默丢失。用目标原值回填。
+        _old = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+        if _old is not None:
+            # 这条连接没设 row_factory，fetchone() 返回 tuple；
+            # SELECT * 的列序与 table_columns() 一致，按位置配对
+            _old_d = dict(zip(dst_cols, _old))
+            for c in dst_cols:
+                if c not in cols and c in _old_d:
+                    cols.append(c)
+                    values.append(_old_d[c])
         conn.execute(
             f"INSERT OR REPLACE INTO sessions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
             values,
@@ -2441,12 +2880,32 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
 
         # workspaces（登记工作目录，否则客户端可能找不到路径）
         if src_row.get("cwd"):
+            # 先删后插必须放进 SAVEPOINT：INSERT 失败时（比如目标表有别的
+            # NOT NULL 无默认值列）不能把已删掉的原记录也一起丢掉
+            conn.execute("SAVEPOINT ws_upsert")
             try:
+                # 表允许同一 path 多行：取 MAX 再和源时间比，保留较晚的那个，
+                # 否则跨账号迁移会把目标侧工作区的排序时间往回拨
+                old_ws = conn.execute(
+                    "SELECT MAX(last_opened_at) FROM workspaces WHERE path = ?",
+                    (src_row["cwd"],),
+                ).fetchone()
+                ts = max(
+                    int(src_row.get("last_activity_at") or 0),
+                    int((old_ws[0] if old_ws else 0) or 0),
+                ) or int(datetime.now().timestamp() * 1000)
+                conn.execute("DELETE FROM workspaces WHERE path = ?", (src_row["cwd"],))
                 conn.execute(
-                    "INSERT OR IGNORE INTO workspaces (path, last_opened_at) VALUES (?, ?)",
-                    (src_row["cwd"], int(src_row.get("last_activity_at") or datetime.now().timestamp() * 1000)),
+                    "INSERT INTO workspaces (path, last_opened_at) VALUES (?, ?)",
+                    (src_row["cwd"], ts),
                 )
+                conn.execute("RELEASE ws_upsert")
             except Exception as e:
+                try:
+                    conn.execute("ROLLBACK TO ws_upsert")
+                    conn.execute("RELEASE ws_upsert")
+                except sqlite3.Error:
+                    pass
                 # 以前这里是 except: pass —— 登记失败会导致"迁移成功但客户端打不开"，
                 # 属于静默失败，至少要告警
                 print(f"  ⚠️  workspaces 登记失败（{e}）：目标客户端可能找不到该工作目录，")
@@ -2470,12 +2929,25 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             meta["target_overwritten"] = dst_row is not None
             _write_meta(bp, meta)
 
-        conn.commit()
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        # 验证放在 commit 之前：同一连接能看到自己未提交的写入，能真实反映
+        # SQL 有没有命中。commit 之后再查几乎必然为 1，等于防错了时点。
         n = conn.execute(
             "SELECT COUNT(*) FROM sessions WHERE id = ? AND user_id = ?", (sid, target_uid)
         ).fetchone()[0]
-        _report_verify("session 行已写入目标库", n)
+        if not _report_verify("session 行已写入目标库", n):
+            conn.rollback()
+            # 库已回滚、数据未改动，此时备份目录里只有一份空 meta.json；
+            # 不清理会让 --backups 多出一条 applied=[] 的假备份
+            # （migrate.py / migrate_project.py 的同类失败都会清半成品）
+            shutil.rmtree(str(bp), ignore_errors=True)
+            # 写入没生效还继续复制正文、move 模式还会删源 → 「目标没写进去、源被删了」。
+            # 与 _migrate_intra() 的 rowcount != 1 直接 rollback + raise 保持同一口径。
+            raise RuntimeError(
+                "目标库写入验证失败（预期 1 行，实际 0 行），已回滚；"
+                "源数据未被删除"
+            )
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         meta["target_overwritten"] = dst_row is not None
         _write_meta(bp, meta)
 
@@ -2591,7 +3063,9 @@ def _migrate_cross(src_ep, dst_ep, src_row, mode, on_conflict,
             left = conn.execute(
                 "SELECT COUNT(*) FROM sessions WHERE id = ?", (src_row["id"],)
             ).fetchone()[0]
-            _report_verify("源 session 行已删除", left, expect=0)
+            if not _report_verify("源 session 行已删除", left, expect=0):
+                raise RuntimeError(
+                    "源 session 行未删除（预期 0 行），已中止；请用 --rollback 撤销")
             meta["source_deleted"] = True
             _write_meta(bp, meta)
         finally:
@@ -2653,7 +3127,8 @@ def choose_edition(prompt, default="domestic"):
             c = input(f"请输入序号（默认 {'1' if default == 'domestic' else '2'}）: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
-            sys.exit(0)
+            _STATE["cancelled"] = True
+            sys.exit(1)
         if not c:
             return default
         if c == "1":
@@ -2700,9 +3175,10 @@ def pick_session(ep: EditionPaths, query=None):
             c = input(f"请选择要迁移的对话（1-{len(rows)}，q 退出）: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
-            sys.exit(0)
+            _STATE["cancelled"] = True
+            sys.exit(1)
         if c.lower() == "q":
-            sys.exit(0)
+            sys.exit(1)
         try:
             idx = int(c) - 1
             if 0 <= idx < len(rows):
@@ -2766,7 +3242,7 @@ def interactive(force=False, mode=None, dry_run=False, assume_yes=False,
         print("   · 源对话属于别的账号 → 只把该对话的 user_id 改到当前账号")
         print("   · 源对话已属于当前账号 → 复制出一份新对话（新 id，标题加「（副本）」）")
         if not ask_yes_no("   是否继续？(y/N): "):
-            sys.exit(0)
+            sys.exit(1)
     elif not dst_ep.exists():
         print(f"\n❌ {dst_ep.label} 没有数据：{dst_ep.db}")
         print("   请至少登录并使用一次目标版本，再执行迁移。")
@@ -2788,6 +3264,7 @@ def interactive(force=False, mode=None, dry_run=False, assume_yes=False,
                 c = input("请输入序号（默认 1）: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n已取消")
+                _STATE["cancelled"] = True
                 return
             mode = "copy" if c == "2" else "move"
             break
@@ -2807,6 +3284,7 @@ def interactive(force=False, mode=None, dry_run=False, assume_yes=False,
                    backup_root=backup_root)
         if not ask_yes_no("\n按上面的计划【正式执行】？(y/N): "):
             print("已取消")
+            _STATE["cancelled"] = True
             return
 
     do_migrate(src_ep, dst_ep, sid, mode=mode, on_conflict=on_conflict,
@@ -2818,6 +3296,8 @@ def interactive(force=False, mode=None, dry_run=False, assume_yes=False,
 
 
 def main():
+    # 进程内重复调用 main() 时不能沿用上一次的取消标记
+    _STATE["cancelled"] = False
     parser = argparse.ArgumentParser(
         description="WorkBuddy 单对话跨版本迁移（国内版 ⇄ 国际版）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2871,6 +3351,7 @@ def main():
         print("   拼错会把对话迁到不存在的账号下，请确认；可用 --rollback 回滚。")
         if not args.yes and not ask_yes_no("   确认继续？(y/N): "):
             print("已取消")
+            _STATE["cancelled"] = True
             sys.exit(1)
 
     if legacy is None:
@@ -2887,7 +3368,9 @@ def main():
         if not require_clients_closed(args.force,
                                       assume_closed=args.assume_clients_closed):
             sys.exit(2)
-        rollback(args.rollback, args.backup_dir, full=args.full, assume_yes=args.yes)
+        if not rollback(args.rollback, args.backup_dir, full=args.full, assume_yes=args.yes):
+            # 用户取消：非零退出，自动化才能区分「取消」与「回滚成功」
+            sys.exit(1)
         return
 
     # 显式路径上 --from / --to 没给时按 domestic（这两个参数的默认值是 None，
@@ -2943,11 +3426,23 @@ def main():
 
 
 if __name__ == "__main__":
+    _strip_sandbox_shim()
     try:
         main()
+        # 取消（确认提示里答否 / 向导里选 q）不能以 0 退出：
+        # 自动化会把「什么都没做」当成成功。与 migrate.py 的 rollback 分支同口径。
+        if _STATE["cancelled"]:
+            sys.exit(1)
     except RuntimeError as e:
         # 备份/复制阶段的业务性中止：给出人话提示，不打 traceback
         print(f"\n❌ {e}")
+        sys.exit(1)
+    except OSError as e:
+        # 磁盘满 / 权限不足：同样给人话，不要甩 traceback
+        print(f"\n❌ 文件操作失败：{e}")
+        sys.exit(1)
+    except (AttributeError, TypeError) as e:
+        print(f"\n❌ 操作失败（{type(e).__name__}）：{e}")
         sys.exit(1)
     except sqlite3.Error as e:
         # 跨库 INSERT 撞上目标库新增的 NOT NULL 无默认值列等情况：
