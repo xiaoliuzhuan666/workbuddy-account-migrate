@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Version 1.7.0](https://img.shields.io/badge/Version-1.7.0-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
+[![Version 1.7.1](https://img.shields.io/badge/Version-1.7.1-brightgreen.svg)](https://github.com/xiaoliuzhuan666/workbuddy-account-migrate)
 
 **[English](#english) | [中文](#chinese)**
 
@@ -179,7 +179,15 @@ python3 scripts/migrate.py --source <USER_ID> --yes --restart
 >
 > 因此同一台机器上装了两个版本时，脚本会按**数据目录**决定读哪份登录态：
 > 指向国际版目录时不会去读国内版的 `storage.json`（否则会把国际版数据迁到一个国际版里不存在的账号下）。
-> **目录优先级**：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空时判为国际版，否则国内版）。交互式向导还会让你确认一次版本。
+> **目录优先级**：`--dir` > `--intl` > 自动探测。交互式向导还会让你确认一次版本。
+>
+> ⚠️ **双版本同装的坑（v1.7.1 修复）**：两个目录**可以同时存在**（国内版 + 国际版各装一个客户端）。
+> 旧版自动探测只要 `~/.workbuddy-ai` 非空就无条件判为国际版、且不打任何提示，于是
+> `--diagnose` 会去诊断几乎空的国际版库，报「只发现一个账号，无需迁移」——而国内版库里
+> 躺着的几百条会话被完全跳过（实测漏掉 266 条）。
+> 现在两个目录都有数据时：**默认处理国内版**，并打印两个目录各自的会话数/账号数，
+> 要操作国际版请显式加 `--intl`（或 `--dir`）。`--diagnose` 也会把「本次未诊断」的
+> 另一版本一并列出，不再只看一半就给结论。
 
 ### 备份目录布局
 
@@ -607,6 +615,22 @@ workbuddy-account-migrate/
 | 正文 id 改写范围 | 只改写 `"sessionId":"..."` 字段值。消息正文里引用到的旧 id（日志、路径）保持原样——那是用户可见内容，不应被改 |
 
 ### 更新日志
+
+#### v1.7.1 (2026-11-09)
+
+**修复：双版本同装时自动探测静默选中国际版，导致诊断得出「无需迁移」的错误结论**
+
+- **症状**：一台机器上同时装了国内版和国际版（`~/.workbuddy` 与 `~/.workbuddy-ai` 都非空），
+  直接跑 `migrate.py --diagnose` 看到的是「只发现一个账号，无需迁移」（退出码 3），
+  国内版库里几百条会话完全没进入统计。实测一台机器上国内版 266 条会话被整段跳过。
+- **根因**：`_find_workbuddy_dir()` 只要 `.workbuddy-ai` 非空就无条件返回国际版目录，
+  且不打印任何提示；`--diagnose` 与不带 `--intl/--dir` 的 `--source` 迁移都吃这个默认值。
+- **修复**：两个目录都有数据时不再替用户挑版本——默认处理**国内版**，并打印两个目录各自的
+  sessions / 账号数，明确给出 `--intl` / `--dir` 两种指定方式；`--diagnose` 额外列出
+  「本次未诊断」的另一版本；「只发现一个账号」的结论在双版本机器上会追加范围限定，
+  提示换版本再看。只有国际版非空 / 只有国内版 / 两个都空 的行为保持不变。
+- **测试**：新增 `tests/run_dual_edition_tests.py`（24 项，纯合成 fixture、跨平台），
+  覆盖单/双版本、空目录、`--intl`、`--dir` 第三方目录等 8 种目录组合。
 
 #### v1.7.0 (2026-10-06)
 
@@ -1213,6 +1237,15 @@ python3 scripts/migrate_project.py --rollback <TAG>
 
 
 ### Changelog
+
+#### v1.7.1 (2026-11-09)
+
+**Fix: auto-detection silently picked the international edition on dual-install machines, producing a bogus "nothing to migrate" result**
+
+- **Symptom**: with both editions installed (`~/.workbuddy` and `~/.workbuddy-ai` both non-empty), `migrate.py --diagnose` reported "only one account found, nothing to migrate" (exit code 3) while hundreds of sessions sat in the domestic database — 266 sessions were skipped on the machine that surfaced this.
+- **Root cause**: `_find_workbuddy_dir()` returned the international directory whenever `.workbuddy-ai` was non-empty, with no warning at all. Both `--diagnose` and `--source` runs without `--intl/--dir` inherited that pick.
+- **Fix**: when both directories hold data, the script no longer chooses for you — the **domestic** edition becomes the default, both directories are printed with their session/account counts, and `--intl` / `--dir` are spelled out. `--diagnose` also lists the edition it did *not* inspect, and the "only one account" verdict now carries an explicit scope caveat on dual-install machines. Single-edition and empty-directory behaviour is unchanged.
+- **Tests**: new `tests/run_dual_edition_tests.py` (24 checks, synthetic fixtures, cross-platform) covering single/dual installs, empty directories, `--intl`, and `--dir` pointing at a third-party path.
 
 #### v1.7.0 (2026-10-06)
 

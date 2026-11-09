@@ -112,17 +112,111 @@ def _looks_like_uid(name: str) -> bool:
     return bool(UUID_RE.match(name or ""))
 
 
-def _find_workbuddy_dir():
-    """自动探测数据目录：国际版用 ~/.workbuddy-ai，国内版用 ~/.workbuddy"""
-    ai_dir = _home() / ".workbuddy-ai"
-    # 目录存在且非空即视为国际版（不依赖 DB 是否已生成）
+# 探测到「两个版本同时装」时填充：{"domestic": Path, "intl": Path}
+# 由 main() / diagnose() / 交互式向导读取，用来提示用户明确指定版本。
+_DUAL_EDITION = {}
+
+
+def _dir_in_use(path):
+    """目录存在且非空即视为该版本已在使用（不依赖 DB 是否已生成）"""
     try:
-        if ai_dir.is_dir() and any(ai_dir.iterdir()):
-            return ai_dir
+        p = Path(path)
+        return p.is_dir() and any(p.iterdir())
     except OSError:
-        # 目录存在但读不了（权限/占用）时不能崩在 import 期，退回国内版路径
-        pass
-    return _home() / ".workbuddy"
+        return False
+
+
+def _same_dir(a, b):
+    """两个路径是否指向同一目录（忽略符号链接、相对写法、尾斜杠差异）"""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return Path(a) == Path(b)
+
+
+def _scan_edition(wb_dir):
+    """只读统计某个数据目录，返回 (session 总数, 账号数)
+
+    库不存在返回 (0, 0)；库存在但打不开返回 (None, None)，由调用方显示"读取失败"。
+    刻意不复用 get_session_counts()：那个函数只统计当前 WORKBUDDY_DIR 全局，
+    而这里要同时看两个版本。
+
+    先试只读 URI；WAL 库在客户端已退出、-shm 不存在时，mode=ro 可能打不开，
+    此时退回普通连接（只做 SELECT，不写任何东西）。
+    """
+    db = Path(wb_dir) / "workbuddy.db"
+    if not db.exists():
+        return 0, 0
+    for open_conn in (
+        lambda: sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True),
+        lambda: sqlite3.connect(str(db)),
+    ):
+        conn = None
+        try:
+            conn = open_conn()
+            total = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            uids = conn.execute("SELECT COUNT(DISTINCT user_id) FROM sessions").fetchone()[0]
+            return total, uids
+        except Exception:
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return None, None
+
+
+def _edition_stat_text(wb_dir):
+    """某版本数据目录的一句话摘要，供提示语使用"""
+    total, uids = _scan_edition(wb_dir)
+    if total is None:
+        return "读取失败"
+    if total == 0:
+        return "无会话"
+    return f"{total} sessions / {uids} 个账号"
+
+
+def _find_workbuddy_dir():
+    """自动探测数据目录：国际版 ~/.workbuddy-ai，国内版 ~/.workbuddy
+
+    两个版本可以同时装在一台机器上。旧实现只要 ~/.workbuddy-ai 非空就无条件
+    返回国际版目录，且一句提示都不打 —— 于是：
+      · `--diagnose` 去诊断几乎空的国际版库，报「只发现一个账号，无需迁移」（退出码 3）
+      · 不带 --intl / --dir 的 `--source` 迁移也会打在国际版库上
+    实测一台双装机器：国内版 266 条会话被完全跳过，报告却说无事可做。
+
+    现在两个目录都有数据时不再替用户挑国际版：默认返回国内版，并把两边路径
+    记进 _DUAL_EDITION，由 main() / diagnose() 明确提示该加 --intl 还是 --dir。
+    """
+    global _DUAL_EDITION
+    domestic = _home() / ".workbuddy"
+    intl = _home() / ".workbuddy-ai"
+    has_domestic = _dir_in_use(domestic)
+    has_intl = _dir_in_use(intl)
+
+    if has_domestic and has_intl:
+        _DUAL_EDITION = {"domestic": domestic, "intl": intl}
+        return domestic
+    if has_intl:
+        return intl
+    return domestic
+
+
+def dual_edition_notice():
+    """双版本同装时的显式提示：两个目录都摆出来，不再静默挑一个"""
+    if not _DUAL_EDITION:
+        return
+    print("=" * 70)
+    print("⚠️  本机同时存在【国内版】和【国际版】两个 WorkBuddy 数据目录")
+    print("=" * 70)
+    for label, key in (("国内版", "domestic"), ("国际版", "intl")):
+        path = _DUAL_EDITION[key]
+        mark = "  ← 本次处理" if _same_dir(path, WORKBUDDY_DIR) else ""
+        print(f"  {label}  {path}  {_edition_stat_text(path)}{mark}")
+    print()
+    print("  两个版本的会话互相独立，只看其中一个会漏掉另一个的数据。")
+    print("  · 要处理国际版：加 --intl")
+    print("  · 要处理指定目录：--dir <路径>")
+    print()
 
 
 def _setup_paths(edition):
@@ -574,8 +668,24 @@ def diagnose():
     print(f"\n总计: {len(all_uids)} 个账号")
     print()
 
+    # 双版本同装：本表只覆盖其中一个版本，必须把另一个也亮出来，
+    # 否则用户会拿「只有一个账号」当结论（实测就漏掉过 266 条会话）。
+    # 用 --dir 指到第三方目录时，两个标准目录都算「另一个」，一并列出。
+    others = [(k, p) for k, p in _DUAL_EDITION.items() if not _same_dir(p, WORKBUDDY_DIR)]
+    if others:
+        for key, other_path in others:
+            other_label = "国际版" if key == "intl" else "国内版"
+            print(f"📦 另一版本的数据目录（本次未诊断）: {other_label} {other_path}")
+            print(f"   {_edition_stat_text(other_path)}")
+        print("   → 换 --intl / --dir 再诊断一次，两边的数据才算看全。")
+        print()
+
     if len(all_uids) <= 1:
         print("⚠️  只发现一个账号，无需迁移。")
+        if others:
+            print("   ⚠️  但本机装着两个版本，这个结论只覆盖 "
+                  f"{WORKBUDDY_DIR.name} —— 另一个版本的数据没算进来，")
+            print("      别据此下结论，换 --intl / --dir 再诊断一次。")
         return
 
     # 建议迁移方向：按数据量排序，只对真正有数据的账号给命令（0 session + 0KB 的噪音不列）
@@ -1977,6 +2087,12 @@ def interactive_migrate(skip_edition_prompt=False, skip_confirm=False,
         print()
         print("  1. 国内版（数据目录 ~/.workbuddy）")
         print("  2. 国际版（数据目录 ~/.workbuddy-ai）")
+        if _DUAL_EDITION:
+            # 双版本同装时，直接回车会落到自动探测的默认值上 —— 把两边数据量
+            # 亮出来，用户才知道这个回车会选中哪个库、会漏掉多少会话
+            print(f"\n  ⚠️  本机两个版本都有数据："
+                  f"国内版 {_edition_stat_text(_DUAL_EDITION['domestic'])}，"
+                  f"国际版 {_edition_stat_text(_DUAL_EDITION['intl'])}")
         print(f"\n  当前自动探测：{'国际版' if detected == 'intl' else '国内版'}（{WORKBUDDY_DIR}）")
         print()
         while True:
@@ -2652,6 +2768,9 @@ def _main():
         _set_workbuddy_dir(args.dir)
     elif args.intl:
         _setup_paths("intl")
+    elif _DUAL_EDITION:
+        # 双版本同装且用户没指定版本：先摆事实，再按默认（国内版）继续
+        dual_edition_notice()
 
     # 互斥参数检查：--rollback 与其它动作参数同给时，以前会被静默丢掉
     if args.rollback and (args.source or args.target or args.restore_tasks
