@@ -121,6 +121,25 @@ def run(args, env_home, stdin=None):
     )
 
 
+def _partial_copy_supported():
+    """本平台能否「只阻塞单个文件」，造出「部分成功后才失败」的场景
+
+    Windows 走独占句柄（share=0），只锁那一个文件，断言可验证。
+
+    其他平台没有等价手段：
+      · POSIX 父目录 chmod 0555 会把同目录所有文件一起挡掉 → 第一个文件就失败，
+        `copied_to` 必然为空，断言不成立（这正是本用例在 macOS 上红的原因）；
+      · macOS 的 chflags uchg 表面可用，但 shutil.copy2 会把 st_flags 一起复制，
+        占位文件被当成「目标侧原有内容」备份走，回滚又把它连同 uchg 还原回来，
+        反而在备份目录里留下删不掉的副本，污染后续用例的 fixture 清理；
+      · 断链符号链接不行：`open(dst, 'wb')` 会把链接目标创建出来，复制照样成功。
+
+    所以只有 Windows 判定为可验证，其余平台显式跳过这条断言 —— 跳过比
+    「装作通过」诚实，也比让 macOS 用户天天看到一条像回归的假红好。
+    """
+    return platform.system() == "Windows"
+
+
 def _block_writes(path: Path):
     """制造「写入目标必然失败」，返回解锁回调
 
@@ -709,9 +728,14 @@ def main():
             if prior:
                 # 关键回归：失败前已复制的文件必须已登记进 copied_to，
                 # 否则回滚不会删它们 → 目标侧残留孤儿正文
-                compact = mt.replace(" ", "").replace("\n", "")
-                check("失败前已复制的文件已登记进 meta",
-                      '"copied_to":[]' not in compact, mt[:300])
+                if _partial_copy_supported():
+                    compact = mt.replace(" ", "").replace("\n", "")
+                    check("失败前已复制的文件已登记进 meta",
+                          '"copied_to":[]' not in compact, mt[:300])
+                else:
+                    print("  ⏭️  跳过「失败前已复制的文件已登记进 meta」："
+                          "本平台无法只阻塞单个文件，造不出『部分成功后失败』"
+                          "（见 _partial_copy_supported 注释）")
             rr = run(["--rollback", tag, "--yes", "--force"], home)
             check("失败后可用备份回滚", rr.returncode == 0,
                   f"rc={rr.returncode} out={(rr.stdout + rr.stderr)[-800:]}")
