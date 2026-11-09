@@ -1,7 +1,7 @@
 ---
 name: 账号迁移工具
 description: WorkBuddy 账号切换后一键同步数据，将旧账号的 Session 历史、Memory 记忆、Connector 配置迁移到当前账号。触发关键词：切账号、迁移、同步数据、账号切换、数据丢失、记录没了、跨设备、导出、导入。
-version: 1.7.0
+version: 1.7.1
 agent_created: true
 ---
 
@@ -88,7 +88,7 @@ python3 scripts/migrate_session.py --rollback <TAG>
 
 `3` 不是新故障 —— v1.6.1 之前这情况返回 `0`，长期被当成"成功"。
 
-**国内版 vs 国际版**：不只是数据目录不同——**登录态来源也不同**。国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`；两个版本都以数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid` 为登录态权威来源，国内版额外可用平台 `storage.json` 的 `genie.userId` 兜底，而**国际版一律不读平台 `storage.json`**（它是国内版的登录态文件；读了会把国内版 uid 当成国际版当前账号，`--intl` 迁移后表现为"迁移成功但所有对话消失"）。目录优先级：`--dir` > `--intl` > 自动探测（`~/.workbuddy-ai` 存在且非空判为国际版）。交互式向导会提示选择版本，默认取自动探测结果。
+**国内版 vs 国际版**：不只是数据目录不同——**登录态来源也不同**。国内版使用 `~/.workbuddy/`，国际版使用 `~/.workbuddy-ai/`；两个版本都以数据目录内的 `storage/skeleton/account-snapshot.json` → `primary.uid` 为登录态权威来源，国内版额外可用平台 `storage.json` 的 `genie.userId` 兜底，而**国际版一律不读平台 `storage.json`**（它是国内版的登录态文件；读了会把国内版 uid 当成国际版当前账号，`--intl` 迁移后表现为"迁移成功但所有对话消失"）。目录优先级：`--dir` > `--intl` > 自动探测。**两个版本可以同时装在一台机器上**：两个目录都非空时，自动探测不再挑国际版（旧行为会让 `--diagnose` 去诊断几乎空的国际版库、报「只发现一个账号，无需迁移」，实测漏掉过国内版 266 条会话），而是**默认处理国内版**、把两个目录各自的会话数/账号数都打印出来，并提示要操作国际版加 `--intl`、要指定目录加 `--dir`；`--diagnose` 会把「本次未诊断」的另一版本一并列出，「只发现一个账号」的结论也带范围限定。交互式向导会提示选择版本，双版本时同时显示两边数据量。
 
 ## 跨设备项目迁移（v1.7，issue #8）
 
