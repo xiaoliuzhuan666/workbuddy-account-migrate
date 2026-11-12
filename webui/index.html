@@ -58,7 +58,7 @@
           <span class="dot" id="client-dot" aria-hidden="true"></span>
           <span class="client-label" id="client-status">客户端：检测中…</span>
         </div>
-        <div class="ver" id="app-version">v1.8.0</div>
+        <div class="ver" id="app-version">v1.8.1</div>
       </div>
     </aside>
 
@@ -97,40 +97,9 @@
       <div class="workspace-body" id="main">
       <section class="page is-on" data-page="accounts" id="page-accounts">
         <div class="accounts-layout">
-          <div class="card sync-card pane-card">
-            <div class="pane-title">同步账号</div>
-            <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
-            <details class="sync-more">
-              <summary>同步说明</summary>
-              <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
-            </details>
-            <div class="sync-grid">
-              <label>源账号
-                <select id="sync-source"></select>
-              </label>
-              <label>目标账号
-                <select id="sync-target"></select>
-              </label>
-              <label>本机令牌（只用于写操作，不会显示在地址栏）
-                <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
-              </label>
-              <label>请输入「确认同步」
-                <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
-              </label>
-            </div>
-            <label class="check">
-              <input type="checkbox" id="sync-yes">
-              我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
-            </label>
-            <div class="actions">
-              <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
-              <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
-            </div>
-            <pre id="sync-log" hidden></pre>
-          </div>
           <div class="accounts-list pane-card">
             <div class="section-head tight">
-              <h2>账号 <span class="count-pill" id="account-count">0</span></h2>
+              <h2>本机账号 <span class="count-pill" id="account-count">0</span></h2>
             </div>
             <div class="account-grid" id="account-grid">
               <article class="account-card skel-card" aria-hidden="true">
@@ -145,6 +114,49 @@
               </article>
             </div>
           </div>
+          <aside class="sync-panel pane-card" id="sync-panel" aria-label="同步账号">
+            <div class="pane-title">同步账号</div>
+            <div class="sync-steps">
+              <div class="sync-step" data-step="1">
+                <div class="sync-step-h"><span class="step-n">1</span> 选择源与目标</div>
+                <div class="sync-pair">
+                  <label>源账号
+                    <select id="sync-source"></select>
+                  </label>
+                  <div class="sync-arrow" aria-hidden="true">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10h12m0 0-4-4m4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </div>
+                  <label>目标账号
+                    <select id="sync-target"></select>
+                  </label>
+                </div>
+                <div id="sync-preview" class="sync-preview">选好两个不同的账号后，这里会预览将要合并的会话和调用数量。</div>
+              </div>
+              <div class="sync-step" data-step="2">
+                <div class="sync-step-h"><span class="step-n">2</span> 安全检查</div>
+                <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
+                <p class="sync-backup-note">同步会先备份本机数据库，再把源账号的会话、记忆和连接器合并到目标账号。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
+              </div>
+              <div class="sync-step" data-step="3">
+                <div class="sync-step-h"><span class="step-n">3</span> 确认并执行</div>
+                <label>本机令牌（只用于写操作，不会显示在地址栏）
+                  <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
+                </label>
+                <label>请输入「确认同步」
+                  <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
+                </label>
+                <label class="check">
+                  <input type="checkbox" id="sync-yes">
+                  我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
+                </label>
+                <div class="actions">
+                  <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
+                  <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
+                </div>
+                <pre id="sync-log" hidden></pre>
+              </div>
+            </div>
+          </aside>
         </div>
       </section>
 
@@ -367,9 +379,10 @@
                 <button type="button" class="btn-ghost btn-icon" id="session-detail-close" title="关闭" aria-label="关闭明细">关闭</button>
               </div>
               <div class="detail-body" id="session-detail-body">
-                <div class="empty-state quiet">
-                  <p class="empty-title">还没选会话</p>
-                  <p class="empty-desc">点击左侧表格里的一行，调用时间、高峰闲时、缓存命中和官方价会显示在这里。不含对话正文。</p>
+                <div class="empty-state quiet tall">
+                  <div class="empty-ico" aria-hidden="true">☰</div>
+                  <p class="empty-title">还没有会话</p>
+                  <p class="empty-desc">这个数据目录里还没有读到会话。同步或使用之后，调用时间和费用会显示在这里。</p>
                 </div>
               </div>
             </aside>

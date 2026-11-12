@@ -918,7 +918,15 @@ def test_desktop_layout():
     check("工作区铺满宽度", ".workspace" in css and "max-width: none" in css)
     check("1024 下明细为抽屉", "translateX(100%)" in css and "master-detail.is-open" in css)
     check("脚本按行选中而不是表内展开", "function renderSessionDetail" in js and "selectSession" in js)
-    check("版本是 1.8", 'v1.8.0' in html)
+    check("版本是 1.8.1", "v1.8.1" in html)
+    check("工作区铺满视口高度", "100dvh" in css and "flex: 1 1 auto" in css)
+    check("细滚动条", "scrollbar-width: thin" in css and "::-webkit-scrollbar" in css)
+    check("主从分栏拉伸到剩余高度", ".master-detail" in css and "min-height: 0" in css)
+    check("无会话时自动选第一行", "userClosedDetail" in js and "!state.openSession && rows.length" in js)
+    check("账号页是列表加同步向导", 'id="sync-panel"' in html and 'id="sync-preview"' in html and 'id="sync-source"' in html)
+    check("同步安全控件都在", 'id="sync-token"' in html and 'id="sync-confirm"' in html and 'id="sync-yes"' in html and 'id="sync-run"' in html and 'id="sync-preflight"' in html)
+    check("确认文案仍是确认同步", "确认同步" in html)
+    check("预检是芯片不是整条红框", "chip-dot" in js and ".preflight.chip" in css)
 
 
 def main():

@@ -29,6 +29,7 @@
     overviewRange: "30d",
     chartRange: "30d",
     openSession: "",
+    userClosedDetail: false,
     openModel: "",
     sessionTotals: null,
     sessionTimeline: null,
@@ -132,7 +133,8 @@
   }
   function emptyRow(cols, title, desc) {
     return (
-      '<tr><td colspan="' + cols + '" class="empty-state">' +
+      '<tr class="empty-tr"><td colspan="' + cols + '" class="empty-state tall">' +
+      '<div class="empty-ico" aria-hidden="true">☰</div>' +
       (title ? '<p class="empty-title">' + escapeHtml(title) + "</p>" : "") +
       '<p class="empty-desc">' + escapeHtml(desc) + "</p></td></tr>"
     );
@@ -331,34 +333,38 @@
     const grid = $("account-grid");
     if (!state.accounts.length) {
       grid.innerHTML =
-        '<div class="card empty-state"><p class="empty-title">还没有账号</p>' +
-        '<p class="empty-desc">这个数据目录里还没有读到账号。</p></div>';
+        '<div class="empty-state tall">' +
+        '<div class="empty-ico" aria-hidden="true">◎</div>' +
+        '<p class="empty-title">还没有账号</p>' +
+        '<p class="empty-desc">这个数据目录里还没有读到账号。同步之前需要本机至少有两个账号。</p></div>';
+      updateSyncPreview();
       return;
     }
     grid.innerHTML = state.accounts
       .map((a) => {
         const u = accountUsage(a.user_id);
         const title = a.nickname || a.display_id || "未命名账号";
+        const initial = (title.trim()[0] || "?").toUpperCase();
         const badge = a.is_current
           ? '<span class="badge badge-on">当前登录</span>'
           : '<span class="badge">本机记录</span>';
+        const nSess = a.session_count || u.sessions || 0;
         return (
           '<article class="account-card">' +
           '<div class="account-card-head">' +
-            "<div><div class='account-name'>" + escapeHtml(title) + "</div>" +
+            '<div class="avatar" aria-hidden="true">' + escapeHtml(initial) + "</div>" +
+            "<div class='account-who'><div class='account-name'>" + escapeHtml(title) + "</div>" +
             "<div class='account-id'>" + escapeHtml(a.display_id) + "</div></div>" +
             badge +
           "</div>" +
-          '<div class="account-metric">' +
-            "<div><span class='n'>" + escapeHtml(fmt(u.credit, 2)) + "</span><span class='u'>已消耗积分</span></div>" +
-            "<div class='hint'>" + escapeHtml(String(a.session_count || u.sessions || 0)) + " 个会话</div>" +
+          '<div class="account-stats">' +
+            "<div><span class='n'>" + escapeHtml(fmt(u.credit, 2)) + "</span><span class='u'>积分</span></div>" +
+            "<div><span class='n'>" + escapeHtml(String(nSess)) + "</span><span class='u'>会话</span></div>" +
+            "<div><span class='n'>" + escapeHtml(fmt(u.calls, 0)) + "</span><span class='u'>调用</span></div>" +
+            "<div><span class='n'>" + escapeHtml(compact(u.prompt)) + "</span><span class='u'>输入</span></div>" +
+            "<div><span class='n'>" + escapeHtml(compact(u.completion)) + "</span><span class='u'>输出</span></div>" +
           "</div>" +
-          '<div class="account-meta">' +
-            "<span>调用 <strong>" + escapeHtml(fmt(u.calls, 0)) + "</strong></span>" +
-            "<span>输入 <strong>" + escapeHtml(compact(u.prompt)) + "</strong></span>" +
-            "<span>输出 <strong>" + escapeHtml(compact(u.completion)) + "</strong></span>" +
-          "</div>" +
-          '<a class="account-link" href="#/sessions" data-filter="' + escapeHtml(a.display_id) + '">查看会话 →</a>' +
+          '<a class="account-link" href="#/sessions" data-filter="' + escapeHtml(a.display_id) + '">查看会话</a>' +
           "</article>"
         );
       })
@@ -370,6 +376,46 @@
         renderSessions();
       });
     });
+    updateSyncPreview();
+  }
+
+  function accountLabel(a) {
+    if (!a) return "—";
+    return a.nickname || a.display_id || "未命名账号";
+  }
+
+  function updateSyncPreview() {
+    const el = $("sync-preview");
+    if (!el) return;
+    const srcId = ($("sync-source") && $("sync-source").value) || "";
+    const tgtId = ($("sync-target") && $("sync-target").value) || "";
+    const src = (state.accounts || []).find((a) => a.user_id === srcId);
+    const tgt = (state.accounts || []).find((a) => a.user_id === tgtId);
+    if (!(state.accounts || []).length) {
+      el.className = "sync-preview is-muted";
+      el.textContent = "还没有可同步的账号。";
+      return;
+    }
+    if (!src || !tgt) {
+      el.className = "sync-preview is-muted";
+      el.textContent = "选好两个不同的账号后，这里会预览将要合并的会话和调用数量。";
+      return;
+    }
+    if (srcId === tgtId) {
+      el.className = "sync-preview is-warn";
+      el.textContent = "源账号和目标账号不能相同。请另选一个目标。";
+      return;
+    }
+    const su = accountUsage(srcId);
+    const tu = accountUsage(tgtId);
+    const nS = src.session_count || su.sessions || 0;
+    const nT = tgt.session_count || tu.sessions || 0;
+    el.className = "sync-preview";
+    el.innerHTML =
+      "将把 <strong>" + escapeHtml(accountLabel(src)) + "</strong> 的 " +
+      escapeHtml(String(nS)) + " 个会话、" + escapeHtml(fmt(su.calls, 0)) +
+      " 次调用合并到 <strong>" + escapeHtml(accountLabel(tgt)) +
+      "</strong>（目前 " + escapeHtml(String(nT)) + " 个会话）。会先备份，再合并。";
   }
 
   async function fillPreflight() {
@@ -378,11 +424,17 @@
     const st = $("client-status");
     try {
       const pf = await get("/api/sync/preflight" + qed());
-      el.className = "preflight " + (pf.clients_running ? "bad" : pf.ok ? "ok" : "bad");
-      el.textContent = pf.message || pf.error || "";
+      const kind = pf.clients_running ? "bad" : pf.ok ? "ok" : "bad";
+      el.className = "preflight chip " + kind;
+      let msg = pf.message || pf.error || "";
       if (pf.clients && pf.clients.length) {
-        el.textContent += " 进程：" + pf.clients.map((c) => c.name).join("、") + "。";
+        msg += " 进程：" + pf.clients.map((c) => c.name).join("、") + "。";
       }
+      const chipLabel = pf.clients_running ? "客户端运行中" : pf.ok ? "客户端未运行" : "需要注意";
+      el.innerHTML =
+        '<span class="chip-dot" aria-hidden="true"></span>' +
+        '<span class="chip-label">' + escapeHtml(chipLabel) + "</span>" +
+        '<span class="chip-msg">' + escapeHtml(msg) + "</span>";
       if (pf.clients_running) {
         dot.className = "dot is-on";
         st.textContent = "WorkBuddy：运行中";
@@ -391,8 +443,11 @@
         st.textContent = "WorkBuddy：未运行";
       }
     } catch (e) {
-      el.className = "preflight bad";
-      el.textContent = "预检失败：" + e.message;
+      el.className = "preflight chip bad";
+      el.innerHTML =
+        '<span class="chip-dot" aria-hidden="true"></span>' +
+        '<span class="chip-label">预检失败</span>' +
+        '<span class="chip-msg">' + escapeHtml("预检失败：" + e.message) + "</span>";
       dot.className = "dot is-warn";
       st.textContent = "客户端：没读到";
     }
@@ -408,6 +463,7 @@
       $("sync-target").value &&
       $("sync-source").value !== $("sync-target").value;
     $("sync-run").disabled = !ok;
+    updateSyncPreview();
   }
 
   async function doSync() {
@@ -1494,6 +1550,7 @@
 
   function closeSessionDetail() {
     state.openSession = "";
+    state.userClosedDetail = true;
     syncDetailOpen();
     const tb = $("session-table") && $("session-table").querySelector("tbody");
     if (tb) tb.querySelectorAll("tr.session-row").forEach((tr) => tr.classList.remove("is-selected"));
@@ -1503,6 +1560,7 @@
   function selectSession(id) {
     const opening = state.openSession !== id;
     state.openSession = opening ? id : "";
+    state.userClosedDetail = !state.openSession;
     syncDetailOpen();
     const tb = $("session-table") && $("session-table").querySelector("tbody");
     if (tb) {
@@ -1524,11 +1582,16 @@
     if (!sid) {
       if (title) title.textContent = "调用明细";
       if (sub) sub.textContent = "在左边选一行会话，查看每次调用的时间和费用。";
+      const noSessions = !(state.sessions && state.sessions.length);
       body.innerHTML =
-        '<div class="empty-state quiet">' +
-        '<p class="empty-title">还没选会话</p>' +
-        '<p class="empty-desc">点击左侧表格里的一行，调用时间、高峰闲时、缓存命中和官方价会显示在这里。不含对话正文。</p>' +
-        "</div>";
+        '<div class="empty-state quiet tall">' +
+        '<div class="empty-ico" aria-hidden="true">☰</div>' +
+        '<p class="empty-title">' + (noSessions ? "还没有会话" : "还没选会话") + "</p>" +
+        '<p class="empty-desc">' +
+        (noSessions
+          ? "这个数据目录里还没有读到会话。同步或使用之后，调用时间和费用会显示在这里。"
+          : "点击左侧表格里的一行，查看每次调用的时间、高峰闲时、缓存命中和官方价。不含对话正文。") +
+        "</p></div>";
       return;
     }
     const s = (state.sessions || []).find((x) => x.id === sid) || {};
@@ -1592,7 +1655,9 @@
       const pg = $("session-page");
       if (pg) pg.textContent = "0 条";
       renderSessionSummary([], isFilter);
-      if (state.openSession) closeSessionDetail();
+      state.openSession = "";
+      state.userClosedDetail = false;
+      renderSessionDetail();
       return;
     }
     renderSessionSummary(rows, isFilter);
@@ -1634,10 +1699,14 @@
     });
     if (wrap) wrap.scrollTop = scroll;
     if (state.openSession && !rows.some((s) => s.id === state.openSession)) {
-      closeSessionDetail();
-    } else {
-      renderSessionDetail();
+      state.openSession = "";
+      state.userClosedDetail = false;
     }
+    if (!state.openSession && rows.length && !state.userClosedDetail) {
+      selectSession(rows[0].id);
+      return;
+    }
+    renderSessionDetail();
   }
 
   function fillCreditRules(rules, rates) {
