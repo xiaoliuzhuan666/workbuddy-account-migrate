@@ -8,142 +8,278 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <p class="eyebrow">只在本机 · 127.0.0.1</p>
-      <h1>WorkBuddy 本机看板</h1>
-    </div>
-    <div class="top-meta" id="top-meta">正在读取本机数据…</div>
-  </header>
+  <div class="app">
+    <aside class="sidebar" aria-label="侧栏">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <rect width="36" height="36" rx="10" fill="#22c55e"/>
+            <path d="M11 22.5c2.2 2.6 4.6 3.9 7 3.9s4.8-1.3 7-3.9" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="14" cy="15.5" r="1.7" fill="#fff"/>
+            <circle cx="22" cy="15.5" r="1.7" fill="#fff"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">本机看板</div>
+          <div class="brand-sub">只在 127.0.0.1</div>
+        </div>
+      </div>
 
-  <main>
-    <section class="panel" id="notice-panel" hidden></section>
+      <nav class="nav" aria-label="主导航">
+        <a href="#/accounts" data-page="accounts" class="nav-item is-active">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="8" r="4"/></svg>
+          账号同步
+        </a>
+        <a href="#/tokens" data-page="tokens" class="nav-item">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Token 统计
+        </a>
+        <a href="#/credits" data-page="credits" class="nav-item">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2z"/></svg>
+          积分与价格
+        </a>
+        <a href="#/sessions" data-page="sessions" class="nav-item">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
+          会话
+        </a>
+      </nav>
 
-    <section class="stats" id="stats"></section>
+      <div class="sidebar-foot">
+        <div class="client-row">
+          <span class="dot" id="client-dot" aria-hidden="true"></span>
+          <span class="client-label" id="client-status">客户端：检测中…</span>
+        </div>
+        <div class="ver" id="app-version">v1.7.1</div>
+      </div>
+    </aside>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>国内模型用量与价格对比</h2>
-        <div class="controls">
-          <label>积分折算
-            <select id="conversion"></select>
+    <main class="main" id="main">
+      <section class="banner" id="notice-panel" hidden></section>
+
+      <!-- 账号同步 -->
+      <section class="page is-on" data-page="accounts" id="page-accounts">
+        <header class="page-head">
+          <div>
+            <h1>账号同步</h1>
+            <p>查看本机账号与会话概况，并把源账号的会话、记忆和连接器合并到目标账号。</p>
+          </div>
+        </header>
+
+        <div class="action-bar">
+          <div class="action-bar-copy">
+            <h2>添加与迁移</h2>
+            <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。不会改登录态，也不支持 OAuth 扫码或切号。</p>
+          </div>
+        </div>
+
+        <div class="card sync-card">
+          <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
+          <div class="sync-grid">
+            <label>源账号
+              <select id="sync-source"></select>
+            </label>
+            <label>目标账号
+              <select id="sync-target"></select>
+            </label>
+            <label>本机令牌（只用于写操作，不会显示在地址栏）
+              <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
+            </label>
+            <label>请输入「确认同步」
+              <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
+            </label>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="sync-yes">
+            我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
           </label>
-          <button type="button" class="ghost" id="reload">刷新</button>
+          <div class="actions">
+            <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
+            <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
+          </div>
+          <pre id="sync-log" hidden></pre>
         </div>
-      </div>
-      <p class="footnote" id="rate-note"></p>
-      <div class="table-wrap">
-        <table id="model-table">
-          <thead>
-            <tr>
-              <th>模型</th>
-              <th class="num">调用</th>
-              <th class="num">输入 token</th>
-              <th class="num">输出 token</th>
-              <th class="num">思考 token</th>
-              <th class="num">缓存命中率</th>
-              <th class="num">去缓存效率</th>
-              <th class="num">实际积分</th>
-              <th class="num">套餐折算</th>
-              <th class="num">API 等效人民币</th>
-              <th class="num">每积分·未命中</th>
-              <th class="num">每积分·缓存</th>
-              <th class="num">每积分·输出</th>
-              <th>官方倍率</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="footnote" id="cross-check"></p>
-    </section>
 
-    <section class="panel" id="prices-panel">
-      <h2>官方价与 AFP</h2>
-      <p class="footnote">价格主源是 ModelLink（人民币，含缓存和峰谷）。没核实到的格子写「没读到」。火山 AFP 用官方公式（输入×系数 + 输出×系数）÷ 10000。这一块的样式你也可以按练手 2 自己改。</p>
-      <div class="split">
-        <div>
-          <h3 class="sub">按量单价（元 / 百万 token）</h3>
-          <div class="table-wrap"><table id="price-table">
-            <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th><th>日期</th></tr></thead>
-            <tbody></tbody>
-          </table></div>
+        <div class="section-head">
+          <h2>账号 <span class="count-pill" id="account-count">0</span></h2>
         </div>
-        <div>
-          <h3 class="sub">火山 AFP 系数</h3>
-          <div class="table-wrap"><table id="afp-table">
-            <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
-            <tbody></tbody>
-          </table></div>
-          <p class="footnote" id="afp-formula"></p>
+        <div class="account-grid" id="account-grid"></div>
+      </section>
+
+      <!-- Token 统计 -->
+      <section class="page" data-page="tokens" id="page-tokens" hidden>
+        <header class="page-head">
+          <div>
+            <h1>Token 统计</h1>
+            <p id="token-updated">正在读取本机用量…</p>
+          </div>
+          <button type="button" class="btn-ghost" id="reload-tokens">刷新统计</button>
+        </header>
+
+        <div class="tabs" id="token-tabs" role="tablist" aria-label="用量来源"></div>
+
+        <h2 class="block-title">Token 总览</h2>
+        <div class="card overview-card">
+          <div class="overview-top">
+            <div class="comp-wrap">
+              <div class="comp-bar" id="comp-bar" aria-label="Token 构成比例"></div>
+              <div class="comp-legend" id="comp-legend"></div>
+            </div>
+            <div class="pills" id="overview-range" data-target="overview">
+              <button type="button" data-range="today">今日</button>
+              <button type="button" data-range="7d">近 7 天</button>
+              <button type="button" data-range="30d" class="is-on">近 30 天</button>
+              <button type="button" data-range="all">总计</button>
+            </div>
+          </div>
+          <div class="metric-row" id="token-metrics"></div>
         </div>
-      </div>
-    </section>
 
-    <section class="panel" id="codebuddy-panel">
-      <h2>其他本机工具</h2>
-      <div id="codebuddy-body">正在探测 CodeBuddy CLI…</div>
-    </section>
+        <h2 class="block-title">Token 与调用趋势</h2>
+        <div class="card chart-card">
+          <div class="chart-head">
+            <p class="chart-note">彩色堆叠柱表示每日 Token 构成，虚线表示调用次数。没有按日数据时写「没读到」。</p>
+            <div class="pills" id="chart-range" data-target="chart">
+              <button type="button" data-range="30d" class="is-on">近 30 天</button>
+              <button type="button" data-range="today">今日</button>
+              <button type="button" data-range="7d">近 7 天</button>
+              <button type="button" data-range="month">本月</button>
+            </div>
+          </div>
+          <div class="chart-legend" id="chart-legend"></div>
+          <div class="chart-box" id="chart-box">
+            <svg id="trend-chart" role="img" aria-label="每日 Token 趋势"></svg>
+            <div class="chart-empty" id="chart-empty" hidden>没读到按日的用量数据。</div>
+            <div class="chart-tip" id="chart-tip" hidden></div>
+          </div>
+        </div>
+      </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>会话记录</h2>
-        <label class="grow">筛选
-          <input type="search" id="session-filter" placeholder="标题、模型或账号">
-        </label>
-      </div>
-      <div class="table-wrap">
-        <table id="session-table">
-          <thead>
-            <tr>
-              <th>标题</th>
-              <th>模型</th>
-              <th class="num">调用</th>
-              <th class="num">积分</th>
-              <th class="num">输入 / 输出</th>
-              <th class="num">缓存命中率</th>
-              <th>更新时间</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="footnote" id="session-page"></p>
-    </section>
+      <!-- 积分与价格 -->
+      <section class="page" data-page="credits" id="page-credits" hidden>
+        <header class="page-head">
+          <div>
+            <h1>积分与价格</h1>
+            <p>积分换 token 只从本机 jsonl 三项反推，不用 5 万默认值。价格来自可编辑的配置，没核实到的格子写「没读到」。</p>
+          </div>
+          <div class="controls">
+            <label class="inline">积分折算
+              <select id="conversion"></select>
+            </label>
+            <button type="button" class="btn-ghost" id="reload">刷新</button>
+          </div>
+        </header>
 
-    <section class="panel warn-panel">
-      <h2>账号同步</h2>
-      <p>默认只读。同步会调用仓库里现有的 <code>migrate.py</code>，把源账号的会话、记忆和连接器合并到目标账号，并先做备份。和命令行一样：<strong>必须先退出 WorkBuddy 客户端</strong>。不会改登录态文件。同步前请看清源和目标，操作不可悄悄撤销（可用 CLI 的 <code>--rollback</code>）。</p>
-      <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
-      <div class="sync-grid">
-        <label>源账号
-          <select id="sync-source"></select>
-        </label>
-        <label>目标账号
-          <select id="sync-target"></select>
-        </label>
-        <label>本机令牌（只用于写操作，不会显示在地址栏）
-          <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
-        </label>
-        <label>请输入「确认同步」
-          <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
-        </label>
-      </div>
-      <label class="check">
-        <input type="checkbox" id="sync-yes">
-        我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
-      </label>
-      <div class="actions">
-        <button type="button" id="sync-run" class="danger" disabled>同步账号</button>
-        <button type="button" id="sync-refresh" class="ghost">重新检查客户端</button>
-      </div>
-      <pre id="sync-log" hidden></pre>
-    </section>
-  </main>
+        <div class="card overview-card">
+          <div class="metric-row" id="stats"></div>
+        </div>
+        <p class="footnote" id="rate-note"></p>
 
-  <footer>
-    数据只在这台电脑上读取，服务只监听 127.0.0.1。价格来自可编辑的 <code>config/model_rates.json</code>，没核实到的会写「没读到」。
-  </footer>
+        <h2 class="block-title">积分换 token（本机反推）</h2>
+        <div class="card">
+          <p class="footnote tight">拟合 credit = a×未命中输入 + b×缓存命中 + c×输出。样本不足或不可靠时三项都标「没读到」，不会回退到社区插件的默认汇率。</p>
+          <div class="table-wrap">
+            <table id="infer-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th class="num">样本</th>
+                  <th>状态</th>
+                  <th class="num">每积分·未命中</th>
+                  <th class="num">每积分·缓存</th>
+                  <th class="num">每积分·输出</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <h2 class="block-title">国内模型用量与价格对比</h2>
+        <div class="card">
+          <div class="table-wrap">
+            <table id="model-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th class="num">调用</th>
+                  <th class="num">输入 token</th>
+                  <th class="num">输出 token</th>
+                  <th class="num">思考 token</th>
+                  <th class="num">缓存命中率</th>
+                  <th class="num">去缓存效率</th>
+                  <th class="num">实际积分</th>
+                  <th class="num">套餐折算</th>
+                  <th class="num">API 等效</th>
+                  <th class="num">每积分·未命中</th>
+                  <th class="num">每积分·缓存</th>
+                  <th class="num">每积分·输出</th>
+                  <th>官方倍率</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="footnote" id="cross-check"></p>
+        </div>
+
+        <section id="prices-panel">
+          <h2 class="block-title">官方价与火山 AFP</h2>
+          <div class="split">
+            <div class="card">
+              <h3 class="sub">按量单价（元 / 百万 token）</h3>
+              <div class="table-wrap"><table id="price-table">
+                <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th><th>日期</th></tr></thead>
+                <tbody></tbody>
+              </table></div>
+            </div>
+            <div class="card">
+              <h3 class="sub">火山 AFP 系数</h3>
+              <div class="table-wrap"><table id="afp-table">
+                <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
+                <tbody></tbody>
+              </table></div>
+              <p class="footnote" id="afp-formula"></p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- 会话 -->
+      <section class="page" data-page="sessions" id="page-sessions" hidden>
+        <header class="page-head">
+          <div>
+            <h1>会话</h1>
+            <p>本机会话列表和每条用量。不含对话正文。点击一行可展开明细。</p>
+          </div>
+          <label class="inline grow">筛选
+            <input type="search" id="session-filter" placeholder="标题、模型或账号">
+          </label>
+        </header>
+
+        <div class="card">
+          <div class="table-wrap">
+            <table id="session-table">
+              <thead>
+                <tr>
+                  <th>标题</th>
+                  <th>模型</th>
+                  <th>账号</th>
+                  <th class="num">调用</th>
+                  <th class="num">积分</th>
+                  <th class="num">输入 / 输出</th>
+                  <th class="num">缓存命中率</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="footnote" id="session-page"></p>
+        </div>
+      </section>
+    </main>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

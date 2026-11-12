@@ -41,7 +41,14 @@ from workbuddy_core.security import (  # noqa: E402
     redact,
     token_matches,
 )
-from workbuddy_core.usage import collect_usage  # noqa: E402
+from workbuddy_core.usage import (  # noqa: E402
+    collect_usage,
+    iter_project_jsonl,
+    parse_raw_usage_line,
+    _empty_bucket,
+    _add,
+    _metrics,
+)
 from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny  # noqa: E402
 from workbuddy_core.volc_afp import coef_for_model  # noqa: E402
 from workbuddy_core.rates import NOT_FOUND  # noqa: E402
@@ -72,6 +79,74 @@ class AppState:
 
 
 STATE = AppState()
+
+
+def _aggregate_by_day(projects_dir, cny_per_credit=None):
+    """按调用自己的日期汇总 token，给趋势图用。没有日期的调用跳过。"""
+    from collections import defaultdict
+    if not projects_dir or not Path(projects_dir).is_dir():
+        return []
+    buckets = defaultdict(_empty_bucket)
+    for fp in iter_project_jsonl(Path(projects_dir)):
+        sid = fp.stem
+        try:
+            with open(fp, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    call = parse_raw_usage_line(line)
+                    if not call:
+                        continue
+                    day = call.get("day") or ""
+                    if not day:
+                        continue
+                    _add(buckets[day], call, sid)
+        except OSError:
+            continue
+    rows = []
+    for day in sorted(buckets):
+        row = _metrics(buckets[day], cny_per_credit, None)
+        row["day"] = day
+        rows.append(row)
+    return rows
+
+
+def _codebuddy_by_day(cb_dict, cny_per_credit=None):
+    """从 CodeBuddy 已探测到的目录再按日汇总；没有就空列表。"""
+    rows = []
+    seen = set()
+    for r in (cb_dict or {}).get("reports") or []:
+        path = r.get("path") or ""
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        projects = Path(path) / "projects"
+        rows.extend(_aggregate_by_day(projects, cny_per_credit))
+    # 同一天可能来自多个根目录，再合并
+    if not rows:
+        return []
+    from collections import defaultdict
+    merged = defaultdict(_empty_bucket)
+    for row in rows:
+        day = row["day"]
+        b = merged[day]
+        b["calls"] += row.get("calls") or 0
+        for k in (
+            "prompt_tokens", "completion_tokens", "total_tokens",
+            "cache_hit_tokens", "uncached_input", "thinking_tokens",
+        ):
+            b[k] += int(row.get(k) or 0)
+        b["credit"] += float(row.get("credit") or 0)
+        b["original_credit"] += float(row.get("original_credit") or 0)
+        # session_count 只能相加（可能重复，但 CodeBuddy 根目录通常只有一个）
+        for _ in range(int(row.get("session_count") or 0)):
+            b["sessions"].add("%s-%d" % (day, len(b["sessions"])))
+    out = []
+    for day in sorted(merged):
+        item = _metrics(merged[day], cny_per_credit, None)
+        item["day"] = day
+        out.append(item)
+    return out
+
+
 
 
 def _json_bytes(obj) -> bytes:
@@ -282,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "bind": STATE.bind,
             "port": STATE.port,
+            "app_version": "1.7.1",
             "token_required_for_writes": True,
             "token_path": str(STATE.token_path) if STATE.token_path else "",
             "confirm_text": CONFIRM_TEXT,
@@ -324,6 +400,11 @@ class Handler(BaseHTTPRequestHandler):
         payload["rates"] = rates.as_public_dict()
         payload["conversion"] = (rates.conversion(conv).as_dict() if rates.conversion(conv) else None)
         payload["codebuddy"] = cb.as_dict()
+        cny = rates.cny_per_credit(conv) if rates else None
+        payload["by_day"] = _aggregate_by_day(resolved.projects_dir, cny)
+        payload["codebuddy"]["by_day"] = _codebuddy_by_day(payload["codebuddy"], cny)
+        from datetime import datetime, timezone, timedelta
+        payload["generated_at"] = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         # 会话明细很大，用量接口只保留汇总；完整会话走 /api/sessions
         payload.pop("session_usage", None)
         return payload
