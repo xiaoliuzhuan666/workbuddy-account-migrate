@@ -16,6 +16,7 @@ WorkBuddy 切换账号后，数据通过 `user_id` 隔离，旧账号的 Session
 | 切账号后，把**整个账号**的数据合并过来（同一版本内） | `scripts/migrate.py` |
 | 只想把**一个对话**从国内版搬到国际版（或反向） | `scripts/migrate_session.py` |
 | **跨设备**：电脑A项目A账号A → 电脑B项目A账号B（issue #8） | `scripts/migrate_project.py` |
+| 本机网页里看用量、会话，并带令牌同步账号（只绑 127.0.0.1） | `scripts/webui.py`，说明见 `docs/WEBUI.md` |
 
 ## 快速使用
 

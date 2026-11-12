@@ -43,3 +43,7 @@ storage.json
 # ai
 /.workbuddy-ai
 /.workbuddy
+
+# 本机网页版令牌（绝不要提交）
+webui-token
+**/webui-token

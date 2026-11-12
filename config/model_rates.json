@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-12",
+  "timezone": "Asia/Singapore",
+  "notes": "本文件可自行编辑。只收录已对照过官方页面或 ModelLink catalog 的数字；没核实到的项写「没读到」，估算时会跳过，不要把猜测值或社区默认「5 万 token/积分」填进来当成官方价格。WorkBuddy「每积分多少 token」不写在这张表里，只从本机 jsonl 反推。",
+  "default_conversion": "topup_pack",
+  "credit_to_cny": [
+    {
+      "key": "topup_pack",
+      "label": "加量包（1000 积分 50 元）",
+      "credits": 1000,
+      "cny": 50,
+      "cny_per_credit": 0.05,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 加量包",
+      "retrieved_at": "2026-11-12",
+      "note": "按加量包 1,000 积分 50 元、有效期 1 个月折算，每积分 0.05 元。只作估算。订阅套餐里每积分更便宜，见同一页面。付费会员才能买加量包。",
+      "status": "ok"
+    },
+    {
+      "key": "standard_monthly_base",
+      "label": "标准版月付（99 元 / 基础 2000 积分）",
+      "credits": 2000,
+      "cny": 99,
+      "cny_per_credit": 0.0495,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 标准版月付与基础积分",
+      "retrieved_at": "2026-11-12",
+      "note": "只按基础 2,000 积分算，不含限时加赠。连续包月是 70 元，每积分会更低。",
+      "status": "ok"
+    },
+    {
+      "key": "standard_monthly_promo",
+      "label": "标准版月付限时实得（99 元 / 4000 积分）",
+      "credits": 4000,
+      "cny": 99,
+      "cny_per_credit": 0.02475,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 标准版每月实得积分（限时）",
+      "retrieved_at": "2026-11-12",
+      "note": "含限时加赠 2,000 积分。赠送部分自到账日起 1 个月内有效，活动结束后不再适用此折算。",
+      "status": "ok"
+    }
+  ],
+  "official_multipliers": {
+    "source": "https://www.workbuddy.cn/docs/workbuddymini/features/Select-Model",
+    "source_title": "WorkBuddy Mini「选择模型」页的积分消耗倍率",
+    "retrieved_at": "2026-11-12",
+    "unit": "界面倍率（xN），不是每百万 token 积分",
+    "note": "取自 2026-11-12 抓取的官方文档。该页没有公布每百万 token 的积分费率，倍率不能单独算出精确费用。模型显示名与 jsonl 里 providerData.model 可能不完全一致，对不上就标「没读到」。主产品（非 Mini）若有另一张表，本文件未收录。",
+    "models": {
+      "Auto": "没读到",
+      "Hy3": 0.0,
+      "GLM-5.2": 0.79,
+      "GLM-5.1": 0.79,
+      "GLM-5v-Turbo": 0.95,
+      "Kimi-K3": 1.62,
+      "Kimi-K2.7-Code": 0.57,
+      "Kimi-K2.6": 0.52,
+      "MiniMax-M3": 0.25,
+      "MiniMax-M2.7": "没读到",
+      "Deepseek-V4-Flash": 0.06,
+      "Deepseek-V4-Pro": 0.16
+    }
+  },
+  "per_million_token_credits": {
+    "source": "没读到",
+    "source_title": "",
+    "retrieved_at": "2026-11-12",
+    "unit": "积分 / 百万 token（未缓存输入、缓存命中、输出）",
+    "note": "官方文档未公布逐 token 费率。本表默认全部为「没读到」。若你根据本机 rawUsage 自己核对过，可以按模型填写 input / cached / output 三个数字，保存后刷新页面即可用来估算。不要把未核对的第三方文章数字直接当成官方费率。",
+    "models": {}
+  },
+  "pricing_policy": {
+    "primary_source": "ModelLink (@modellink/data / catalog.json, MIT)",
+    "primary_source_url": "https://github.com/goroutined/modellink",
+    "catalog_url": "https://goroutined.github.io/modellink/",
+    "secondary_source": "models.dev",
+    "secondary_source_url": "https://models.dev/api.json",
+    "backup_source": "LiteLLM model cost map（仅当前两处都没有时，且必须标明美元与来源）",
+    "backup_source_url": "https://docs.litellm.ai/docs/proxy/model_cost_map",
+    "workbuddy_tokens_per_credit": "只从本地 jsonl 反推，缓存命中/未命中/输出分开；禁止使用 50000 作为默认值",
+    "tokscale": "只核对 token 总量，不当积分账本、不用其默认 LiteLLM 价",
+    "updated_at": "2026-11-12"
+  },
+  "inference": {
+    "min_calls": 30,
+    "min_r2": 0.95,
+    "note": "门槛参考 workbuddy-usage-status。不够格则三项标没读到，只保留含缓存的合计参考并注明不能当官方汇率。",
+    "forbidden_default_tokens_per_credit": 50000,
+    "forbidden_default_reason": "xsdao/dsh-workbuddy-token 的基准 5 万是作者 2026-10-29 实测、官方未公布，禁止当默认值。"
+  },
+  "api_unit_prices": {
+    "currency": "CNY",
+    "unit": "CNY / million tokens",
+    "note": "主源 ModelLink cost_cn，并与官文核对。峰谷按条目填写。glm-5.3-flash 的人民币 cost_cn 调研时为空，保持没读到。",
+    "models": [
+      {
+        "id": "deepseek-flash",
+        "match": [
+          "deepseek-flash",
+          "deepseek-v4-flash",
+          "Deepseek-V4-Flash"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 1,
+        "output": 4,
+        "cached_read": 0.02,
+        "peak": {
+          "input": 2,
+          "output": 8,
+          "cached_read": 0.04,
+          "note": "高峰为闲时两倍"
+        },
+        "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing.md",
+        "source_via": "ModelLink catalog.json cost_cn，并与 DeepSeek 官文核对",
+        "retrieved_at": "2026-11-12",
+        "source_date_in_catalog": "2026-10-17",
+        "status": "ok",
+        "note": "闲时价；本地 jsonl 若无时段标记，等效人民币默认用闲时并注明未区分高峰。"
+      },
+      {
+        "id": "glm-5.3",
+        "match": [
+          "glm-5.3",
+          "GLM-5.3"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 8,
+        "output": 28,
+        "cached_read": 2,
+        "source": "https://goroutined.github.io/modellink/",
+        "source_via": "ModelLink catalog.json cost_cn（智谱文档，catalog 标注 2026-08-19）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "来源日期 2026-08-19。精确官文 URL 以 ModelLink 条目为准；此处 source 指向智谱文档站，如需更精确路径请在练手 1 补全。"
+      },
+      {
+        "id": "glm-5.3-flash",
+        "match": [
+          "glm-5.3-flash",
+          "GLM-5.3-Flash"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "https://goroutined.github.io/modellink/",
+        "source_via": "ModelLink catalog.json 该条 cost_cn 为空（2026-11-12 调研）",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "models.dev 有美元价（2026-08-26：输入 0.11952、输出 0.41831、缓存读 0.03436），没有已注明来源的汇率前不折人民币。留给练手 1 在核对后填写。"
+      },
+      {
+        "id": "kimi-k3.1-pro",
+        "match": [
+          "kimi-k3.1-pro",
+          "Kimi-K3.1-Pro"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 13,
+        "output": 68,
+        "cached_read": 1.3,
+        "cached_write": 13,
+        "source": "https://goroutined.github.io/modellink/",
+        "source_via": "ModelLink catalog.json cost_cn（月之暗面文档，catalog 标注 2026-10-24）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok"
+      },
+      {
+        "id": "qwen3.8-max",
+        "match": [
+          "qwen3.8-max",
+          "qwen3-8-max"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 12,
+        "output": 36,
+        "cached_read": 1.5,
+        "cached_write": 15,
+        "source": "https://goroutined.github.io/modellink/",
+        "source_via": "ModelLink catalog.json cost_cn（百炼，catalog 标注 2026-08-03）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok"
+      },
+      {
+        "id": "deepseek-v4.1-flash",
+        "match": [
+          "deepseek-v4.1-flash"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "https://goroutined.github.io/modellink/",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "不要把 deepseek-flash（v4-flash）的闲时价套到 v4.1-flash 上。核对到官方人民币价后再填。"
+      }
+    ]
+  },
+  "volc_afp": {
+    "formula": "(input_tokens * input_coef + output_tokens * output_coef) / 10000",
+    "source": "https://docs.volcengine.com/docs/ark/agent-plan-personal-afp-credits-billing-rules?lang=zh",
+    "source_title": "火山方舟 Agent Plan 个人版 AFP 抵扣规则",
+    "retrieved_at": "2026-11-12",
+    "note": "系数可能有限时折扣，以官文为准。Medium 档 200 元/10 万 AFP 只是套餐额度，不能单独推出 1 AFP 等于多少 token。只收录文本生成模型中已在 2026-11-12 打开官文核对过的条目。",
+    "models": {
+      "deepseek-v4-flash": {
+        "match": [
+          "deepseek-v4-flash",
+          "deepseek-flash"
+        ],
+        "input_coef": 0.5,
+        "output_coef": 0.5,
+        "status": "ok",
+        "limited_offer": false
+      },
+      "deepseek-v4.1-flash": {
+        "match": [
+          "deepseek-v4.1-flash"
+        ],
+        "input_coef": 0.875,
+        "output_coef": 0.875,
+        "status": "ok",
+        "limited_offer": true,
+        "note": "限时折扣，原系数 2.5。到期后应改回官文新值或标没读到，不自动延长。"
+      },
+      "deepseek-v4.1-flash-economy": {
+        "match": [
+          "deepseek-v4.1-flash-economy"
+        ],
+        "input_coef": 1,
+        "output_coef": 1,
+        "status": "ok",
+        "limited_offer": true,
+        "note": "限时折扣，原系数 2。"
+      },
+      "glm-5.3-flash": {
+        "match": [
+          "glm-5.3-flash"
+        ],
+        "input_coef": 0.5,
+        "output_coef": 0.5,
+        "status": "ok",
+        "limited_offer": false
+      },
+      "glm-5.3": {
+        "match": [
+          "glm-5.3",
+          "glm-latest"
+        ],
+        "input_coef": 4.5,
+        "output_coef": 4.5,
+        "status": "ok",
+        "limited_offer": false
+      },
+      "kimi-k3.1-pro": {
+        "match": [
+          "kimi-k3.1-pro"
+        ],
+        "input_coef": 7,
+        "output_coef": 7,
+        "status": "ok",
+        "limited_offer": false
+      },
+      "kimi-k2.8-preview": {
+        "match": [
+          "kimi-k2.8-preview"
+        ],
+        "input_coef": 4.8,
+        "output_coef": 4.8,
+        "status": "ok",
+        "limited_offer": true,
+        "note": "限时折扣，原系数 8。"
+      },
+      "kimi-k3": {
+        "match": [
+          "kimi-k3"
+        ],
+        "input_coef": 10,
+        "output_coef": 10,
+        "status": "ok",
+        "limited_offer": false,
+        "note": "官文标注即将下线。"
+      },
+      "deepseek-v4-pro": {
+        "match": [
+          "deepseek-v4-pro"
+        ],
+        "input_coef": 5.5,
+        "output_coef": 5.5,
+        "status": "ok",
+        "limited_offer": false
+      }
+    }
+  }
+}

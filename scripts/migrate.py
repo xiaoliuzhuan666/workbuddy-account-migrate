@@ -730,7 +730,8 @@ PROC_KEYWORDS = ("workbuddy", "codebuddy")
 
 # 本工具自身的脚本名（用于把自己从"正在运行的客户端"里排除掉）
 _SELF_SCRIPT_NAMES = ("migrate.py", "migrate_session.py", "migrate_project.py",
-                      "run_tests.py", "run_project_tests.py", "prepare_fixture.py")
+                      "run_tests.py", "run_project_tests.py", "prepare_fixture.py",
+                      "webui.py", "run_webui_tests.py")
 
 # 用户取消标记：取消点只 print 就 return，main() 无法区分「取消」与「成功」。
 # --restart 尤其不能在被取消之后还把客户端拉起来。
