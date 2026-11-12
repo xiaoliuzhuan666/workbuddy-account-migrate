@@ -40,7 +40,7 @@ from workbuddy_core.inference import (
     fit_credit_rates, infer_for_model, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT,
 )
 from workbuddy_core.volc_afp import afp_for_tokens, coef_for_model
-from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny
+from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models
 from workbuddy_core.rates import NOT_FOUND
 
 PASSED = 0
@@ -555,12 +555,16 @@ def test_inference_afp_equivalent():
     check("等效人民币闲时 100 万输入 = 1 元", eq["status"] == "ok" and abs(eq["cny"] - 1) < 1e-9, str(eq))
     eqp = equivalent_cny(1_000_000, 0, 0, pr, use_peak=True)
     check("高峰 100 万输入 = 2 元", eqp["status"] == "ok" and abs(eqp["cny"] - 2) < 1e-9, str(eqp))
-    pr_miss = lookup_unit_price(rates.api_unit_prices, "glm-5.3-flash")
-    check("glm-5.3-flash 人民币单价没读到", pr_miss["status"] == NOT_FOUND)
-    eqm = equivalent_cny(1000, 100, 10, pr_miss)
+    pr_glm = lookup_unit_price(rates.api_unit_prices, "glm-5.3-flash")
+    check("glm-5.3-flash 已对照智谱官文填写", pr_glm["status"] == "ok" and pr_glm["input"] == 0.8 and pr_glm["output"] == 2.8 and pr_glm["cached_read"] == 0.23, str(pr_glm))
+    check("glm-5.3-flash 来源是智谱官方定价页", "docs.bigmodel.cn" in (pr_glm.get("source") or ""), str(pr_glm))
+    pr_hy = lookup_unit_price(rates.api_unit_prices, "hy4-free")
+    check("hy4-free 官方单价没读到（不写成 0）", pr_hy["status"] == NOT_FOUND)
+    eqm = equivalent_cny(1000, 100, 10, pr_hy)
     check("没读到单价时等效费用不是 0 而是没读到", eqm["status"] == NOT_FOUND and eqm["cny"] is None)
     pr41 = lookup_unit_price(rates.api_unit_prices, "deepseek-v4.1-flash")
-    check("不把 v4-flash 的价套到 v4.1-flash", pr41["status"] == NOT_FOUND)
+    check("v4.1-flash 已对照 DeepSeek 官文填写", pr41["status"] == "ok" and pr41["input"] == 1 and pr41["output"] == 4 and pr41["cached_read"] == 0.02, str(pr41))
+    check("v4.1-flash 来源是 DeepSeek 官方定价页", "api-docs.deepseek.com" in (pr41.get("source") or ""), str(pr41))
 
     # 在完整 fixture 上：glm-5.1 无 API 价；用量接口应带 inference 字段
     home, _, _ = make_home()
@@ -571,8 +575,15 @@ def test_inference_afp_equivalent():
     check("fixture 样本不足时 inference 没读到", models["glm-5.1"]["inference"]["status"] == NOT_FOUND)
     check("fixture 不出现 5 万默认", models["glm-5.1"]["inference"]["tokens_per_credit"]["uncached_input"] is None)
     check("glm-5.1 无精确 API 价则等效没读到", models["glm-5.1"]["equivalent_cny_status"] == NOT_FOUND)
-    # 合计 equivalent：fixture 模型都没对上已核对单价（kimi-k2.6 不在表里；deepseek-v4.1-flash 没读到；glm-5.1 不在 api 表）
-    check("全部缺价时总等效没读到", report.totals.get("equivalent_cny_status") == NOT_FOUND)
+    # fixture：deepseek-v4.1-flash 现已有官方单价；glm-5.1 仍然没有。合计应为 partial。
+    ds = models["deepseek-v4.1-flash"]
+    check("fixture 里 v4.1-flash 等效人民币已算出", ds["equivalent_cny_status"] == "ok" and ds["equivalent_cny"] is not None, str(ds))
+    # sess-a: 800 uncached + 200 hit + 50 out；sess-b: 200 + 0 + 30
+    # (1000*1 + 200*0.02 + 80*4) / 1e6 = 0.00132
+    expected = (1000 * 1 + 200 * 0.02 + 80 * 4) / 1_000_000.0
+    check("v4.1-flash 等效人民币按闲时价", abs(ds["equivalent_cny"] - expected) < 1e-9, str((ds["equivalent_cny"], expected)))
+    check("有部分模型缺价时总等效为 partial", report.totals.get("equivalent_cny_status") == "partial", str(report.totals))
+    check("总等效只加有价的模型", abs(report.totals.get("equivalent_cny") - round(expected, 4)) < 1e-9, str((report.totals.get("equivalent_cny"), expected)))
 
 
 def test_prices_api_and_refresh_skeleton():
@@ -588,7 +599,11 @@ def test_prices_api_and_refresh_skeleton():
         check("价格接口不含令牌内容", token not in blob)
         models = ((obj.get("api_unit_prices") or {}).get("models") or [])
         flash = next((m for m in models if m.get("id") == "glm-5.3-flash"), None)
-        check("glm-5.3-flash 在表里且没读到", flash and flash.get("status") == NOT_FOUND)
+        check("glm-5.3-flash 在表里且已核对", flash and flash.get("status") == "ok" and flash.get("input") == 0.8)
+        hy = next((m for m in models if m.get("id") == "hy4-free"), None)
+        check("hy4-free 在表里且没读到", hy and hy.get("status") == NOT_FOUND)
+        v41 = next((m for m in models if m.get("id") == "deepseek-v4.1-flash"), None)
+        check("v4.1-flash 在表里且已核对", v41 and v41.get("status") == "ok" and v41.get("input") == 1)
         st, obj, _ = _req(port, "GET", "/api/compare?model=glm-5.1")
         check("GET /api/compare 200", st == 200 and obj.get("ok"))
         # 无令牌刷新
@@ -599,6 +614,72 @@ def test_prices_api_and_refresh_skeleton():
             "Origin": "http://127.0.0.1:%d" % port,
         }, body={"confirm": True})
         check("有令牌时刷新骨架 501（留给练手 3）", st == 501, str((st, obj)))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+
+def test_session_official_cost():
+    print("\n[会话官方价]")
+    # 纯函数：三项拆分、缺价不计 0
+    rates = load_rates(ROOT / "config" / "model_rates.json")
+    prices = rates.api_unit_prices
+    one = official_cost_by_models([
+        {"model": "deepseek-v4.1-flash", "uncached_input": 1_000_000, "cache_hit_tokens": 0, "completion_tokens": 0},
+    ], prices)
+    check("单一有价模型 status=ok", one["status"] == "ok" and abs(one["cny"] - 1) < 1e-9, str(one))
+
+    glm = official_cost_by_models([
+        {"model": "glm-5.3-flash", "uncached_input": 1_000_000, "cache_hit_tokens": 1_000_000, "completion_tokens": 1_000_000},
+    ], prices)
+    expected_glm = 0.8 + 0.23 + 2.8
+    check("glm-5.3-flash 三项拆分", glm["status"] == "ok" and abs(glm["cny"] - expected_glm) < 1e-9, str(glm))
+
+    miss = official_cost_by_models([
+        {"model": "hy4-free", "uncached_input": 1000, "cache_hit_tokens": 100, "completion_tokens": 50},
+    ], prices)
+    check("hy4-free 官方价没读到且费用不是 0", miss["status"] == NOT_FOUND and miss["cny"] is None, str(miss))
+    check("缺价模型出现在 missing_models", "hy4-free" in miss["missing_models"], str(miss))
+
+    mixed = official_cost_by_models([
+        {"model": "deepseek-v4.1-flash", "uncached_input": 1000, "cache_hit_tokens": 200, "completion_tokens": 50},
+        {"model": "glm-5.1", "uncached_input": 0, "cache_hit_tokens": 600, "completion_tokens": 20},
+    ], prices)
+    expected_mix = (1000 * 1 + 200 * 0.02 + 50 * 4) / 1_000_000.0
+    check("混合模型 status=partial", mixed["status"] == "partial", str(mixed))
+    check("混合模型只计入有价部分", abs(mixed["cny"] - expected_mix) < 1e-9, str(mixed))
+    check("混合模型注明未计入", "没读到价格，未计入" in (mixed["note"] or "") and mixed["missing_count"] == 1, str(mixed))
+
+    # 完整 fixture：会话甲混合（v4.1-flash + glm-5.1），会话乙只有 v4.1-flash
+    home, sid_a, sid_b = make_home()
+    resolved = resolve_workbuddy(home=home)
+    report = collect_usage(resolved, rates=rates)
+    su = report.as_dict()["session_usage"]
+    a = su[sid_a]
+    b = su[sid_b]
+    check("会话甲官方价为 partial", a["official_cny_status"] == "partial", str(a))
+    expected_a = (800 * 1 + 200 * 0.02 + 50 * 4) / 1_000_000.0
+    check("会话甲只计 v4.1-flash", abs(a["official_cny"] - expected_a) < 1e-9, str(a))
+    check("会话甲缺价模型是 glm-5.1", "glm-5.1" in a["official_cny_missing_models"], str(a))
+    expected_b = (200 * 1 + 0 + 30 * 4) / 1_000_000.0
+    check("会话乙官方价为 ok", b["official_cny_status"] == "ok" and abs(b["official_cny"] - expected_b) < 1e-9, str(b))
+
+    # HTTP：/api/sessions 带官方价和合计
+    token_file = home / ".config" / "workbuddy-account-migrate" / "webui-token"
+    httpd, port, token = _start_server(home, token_file)
+    try:
+        st, obj, raw = _req(port, "GET", "/api/sessions?limit=200")
+        check("GET /api/sessions 200", st == 200, str((st, obj)))
+        blob = raw.decode("utf-8")
+        check("会话接口不含假凭证", "SUPER_SECRET" not in blob and "ANOTHER_SECRET" not in blob)
+        by_id = {s["id"]: s for s in (obj.get("sessions") or [])}
+        ua = (by_id[sid_a].get("usage") or {})
+        check("接口里会话甲有官方价", ua.get("official_cny_status") == "partial" and abs(ua["official_cny"] - expected_a) < 1e-9, str(ua))
+        totals = obj.get("official_totals") or {}
+        check("接口合计含总 token", totals.get("total_tokens") is not None and totals["total_tokens"] > 0, str(totals))
+        check("接口合计官方价只计入有价部分", totals.get("official_cny_status") == "partial" and abs(totals["official_cny"] - (expected_a + expected_b)) < 1e-9, str(totals))
+        check("合计注明未计入", "没读到价格，未计入" in (totals.get("official_cny_note") or ""), str(totals))
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -618,6 +699,7 @@ def main():
         test_http,
         test_inference_afp_equivalent,
         test_prices_api_and_refresh_skeleton,
+        test_session_official_cost,
         test_bind_cli,
     ):
         try:

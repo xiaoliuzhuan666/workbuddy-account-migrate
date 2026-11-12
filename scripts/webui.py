@@ -153,6 +153,62 @@ def _json_bytes(obj) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _official_totals(sessions):
+    """把本页会话已算好的官方价加总。筛选后的合计由前端按同样规则再算一遍。"""
+    from workbuddy_core.rates import NOT_FOUND
+    cny = 0.0
+    priced = 0
+    missing_sessions = 0
+    missing_models = set()
+    tokens = 0
+    uncached = 0
+    cache_hit = 0
+    output = 0
+    credit = 0.0
+    prompt = 0
+    for s in sessions:
+        u = s.get("usage") or {}
+        tokens += int(u.get("total_tokens") or 0)
+        uncached += int(u.get("uncached_input") or 0)
+        cache_hit += int(u.get("cache_hit_tokens") or 0)
+        output += int(u.get("completion_tokens") or 0)
+        prompt += int(u.get("prompt_tokens") or 0)
+        credit += float(u.get("credit") or 0)
+        status = u.get("official_cny_status")
+        if status in ("ok", "partial") and u.get("official_cny") is not None:
+            cny += float(u["official_cny"])
+            priced += 1
+        if status in (NOT_FOUND, "partial") or (u.get("official_cny_missing_count") or 0):
+            if status != "ok":
+                missing_sessions += 1
+            for m in (u.get("official_cny_missing_models") or []):
+                missing_models.add(m)
+    if priced and not missing_sessions:
+        status = "ok"
+        note = ""
+    elif priced:
+        status = "partial"
+        note = "%d 个会话模型没读到价格，未计入" % missing_sessions
+    else:
+        status = NOT_FOUND
+        note = ("%d 个会话模型没读到价格，未计入" % missing_sessions) if missing_sessions else "没读到官方价。"
+    return {
+        "session_count": len(sessions),
+        "total_tokens": tokens,
+        "prompt_tokens": prompt,
+        "uncached_input": uncached,
+        "cache_hit_tokens": cache_hit,
+        "completion_tokens": output,
+        "credit": round(credit, 4),
+        "official_cny": round(cny, 6) if priced else None,
+        "official_cny_status": status,
+        "official_cny_note": note,
+        "official_cny_priced_sessions": priced,
+        "official_cny_missing_sessions": missing_sessions,
+        "official_cny_missing_models": sorted(missing_models),
+        "currency": "CNY",
+    }
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "WorkBuddyWebui/0.1"
     protocol_version = "HTTP/1.1"
@@ -366,6 +422,7 @@ class Handler(BaseHTTPRequestHandler):
             "read_only_default": True,
         }
 
+
     def _sessions(self, q):
         resolved = STATE.resolved(q.get("edition"))
         limit = int(q.get("limit") or 200)
@@ -386,6 +443,7 @@ class Handler(BaseHTTPRequestHandler):
             "files_scanned": usage.files_scanned,
             "calls": usage.calls,
         }
+        data["official_totals"] = _official_totals(data.get("sessions") or [])
         return data
 
     def _usage(self, q):

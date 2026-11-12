@@ -93,7 +93,7 @@
   "api_unit_prices": {
     "currency": "CNY",
     "unit": "CNY / million tokens",
-    "note": "主源 ModelLink cost_cn，并与官文核对。峰谷按条目填写。glm-5.3-flash 的人民币 cost_cn 调研时为空，保持没读到。",
+    "note": "主源 ModelLink cost_cn，并与官文核对。峰谷按条目填写。glm-5.3-flash 人民币单价已于 2026-11-12 对照智谱官方定价页填写；deepseek-v4.1-flash 已于同日对照 DeepSeek 官方定价页填写（官文写明 deepseek-flash 当前版本即 DeepSeek-V4.1-Flash-1017）。",
     "models": [
       {
         "id": "deepseek-flash",
@@ -145,14 +145,14 @@
         ],
         "currency": "CNY",
         "unit": "CNY / million tokens",
-        "input": "没读到",
-        "output": "没读到",
-        "cached_read": "没读到",
-        "source": "https://goroutined.github.io/modellink/",
-        "source_via": "ModelLink catalog.json 该条 cost_cn 为空（2026-11-12 调研）",
+        "input": 0.8,
+        "output": 2.8,
+        "cached_read": 0.23,
+        "source": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+        "source_via": "智谱官方定价页（2026-11-12 核对）",
         "retrieved_at": "2026-11-12",
-        "status": "没读到",
-        "note": "models.dev 有美元价（2026-08-26：输入 0.11952、输出 0.41831、缓存读 0.03436），没有已注明来源的汇率前不折人民币。留给练手 1 在核对后填写。"
+        "status": "ok",
+        "note": "取自智谱官方定价页「最新模型」表：GLM-5.3-Flash 输入 0.8 元、输出 2.8 元、缓存命中 0.23 元 / 百万 Tokens；缓存存储限时免费（不计入按量估算）。本条用标准价，不用限时折扣。"
       },
       {
         "id": "kimi-k3.1-pro",
@@ -191,17 +191,45 @@
       {
         "id": "deepseek-v4.1-flash",
         "match": [
-          "deepseek-v4.1-flash"
+          "deepseek-v4.1-flash",
+          "DeepSeek-V4.1-Flash",
+          "DeepSeek-V4.1-Flash-1017"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 1,
+        "output": 4,
+        "cached_read": 0.02,
+        "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing.md",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "官文写明模型名请使用 deepseek-flash，其「模型版本」为 DeepSeek-V4.1-Flash-1017。闲时：输入 1 元、缓存命中 0.02 元、输出 4 元 / 百万 tokens；高峰为闲时两倍（北京时间周一至周五不含法定节假日 9:00-12:00、14:00-18:00）。本地 jsonl 里的模型名是 deepseek-v4.1-flash，按该页 Flash 价计。若无时段标记，等效人民币默认用闲时并注明未区分高峰。",
+        "peak": {
+          "input": 2,
+          "output": 8,
+          "cached_read": 0.04,
+          "note": "高峰为闲时两倍"
+        },
+        "source_via": "DeepSeek 官方定价页（2026-11-12 核对）"
+      },
+      {
+        "id": "hy4-free",
+        "match": [
+          "hy4-free",
+          "hy4free",
+          "Hy4-Free",
+          "Hy4free"
         ],
         "currency": "CNY",
         "unit": "CNY / million tokens",
         "input": "没读到",
         "output": "没读到",
         "cached_read": "没读到",
-        "source": "https://goroutined.github.io/modellink/",
+        "source": "没读到",
+        "source_via": "未在官方定价页读到按量单价（2026-11-12）",
         "retrieved_at": "2026-11-12",
         "status": "没读到",
-        "note": "不要把 deepseek-flash（v4-flash）的闲时价套到 v4.1-flash 上。核对到官方人民币价后再填。"
+        "note": "WorkBuddy 客户端里 hy4free 曾有限时免费额度（积分倍率 0，活动期至 2026-11-15），那是积分活动，不是官方 API 按量单价，且额度用完后仍会扣积分。腾讯云混元 Hy4 标准接口另有刊例价，但不能当成 hy4-free 的官方单价。未在官方定价页读到「免费即 0 元/百万 token」的表述，故保持没读到，不把价格写成 0。"
       }
     ]
   },

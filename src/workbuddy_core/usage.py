@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .paths import ResolvedDir, open_db_readonly
 from .rates import NOT_FOUND, RatesConfig
 from .inference import infer_for_model, DEFAULT_MIN_CALLS, DEFAULT_MIN_R2, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT
-from .equivalent_cost import lookup_unit_price, equivalent_cny
+from .equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models
 from .volc_afp import afp_for_tokens, coef_for_model
 
 # 与上游 usage-status 一致的字段名
@@ -294,21 +294,49 @@ class UsageReport:
             "notes": self.notes,
             # 会话用量单独走 sessions 接口拼，这里只给 id→数字，避免把标题重复塞两遍
             "session_usage": {
-                sid: {
-                    "calls": b["calls"],
-                    "credit": round(b["credit"], 4),
-                    "prompt_tokens": b["prompt_tokens"],
-                    "completion_tokens": b["completion_tokens"],
-                    "cache_hit_tokens": b["cache_hit_tokens"],
-                    "uncached_input": b["uncached_input"],
-                    "thinking_tokens": b["thinking_tokens"],
-                    "total_tokens": b["total_tokens"],
-                    "model_counts": b.get("model_counts") or {},
-                    "user_id": b.get("user_id") or "",
-                }
+                sid: _session_usage_public(b)
                 for sid, b in self.by_session.items()
             },
         }
+
+
+
+def _session_usage_public(b: dict) -> dict:
+    official = b.get("official") or {}
+    by_model = {}
+    for name, mb in (b.get("by_model") or {}).items():
+        by_model[name] = {
+            "calls": mb["calls"],
+            "prompt_tokens": mb["prompt_tokens"],
+            "completion_tokens": mb["completion_tokens"],
+            "cache_hit_tokens": mb["cache_hit_tokens"],
+            "uncached_input": mb["uncached_input"],
+            "thinking_tokens": mb["thinking_tokens"],
+            "total_tokens": mb["total_tokens"],
+            "credit": round(mb["credit"], 4),
+        }
+    return {
+        "calls": b["calls"],
+        "credit": round(b["credit"], 4),
+        "prompt_tokens": b["prompt_tokens"],
+        "completion_tokens": b["completion_tokens"],
+        "cache_hit_tokens": b["cache_hit_tokens"],
+        "uncached_input": b["uncached_input"],
+        "thinking_tokens": b["thinking_tokens"],
+        "total_tokens": b["total_tokens"],
+        "model_counts": b.get("model_counts") or {},
+        "user_id": b.get("user_id") or "",
+        "by_model": by_model,
+        "official_cny": official.get("cny"),
+        "official_cny_status": official.get("status") or NOT_FOUND,
+        "official_cny_note": official.get("note") or "",
+        "official_cny_missing_models": official.get("missing_models") or [],
+        "official_cny_missing_count": official.get("missing_count") or 0,
+        "official_cny_priced_count": official.get("priced_count") or 0,
+        "official_cny_by_model": official.get("by_model") or [],
+        "official_cny_period": official.get("period") or "",
+        "official_cny_currency": official.get("currency") or "CNY",
+    }
 
 
 def collect_usage(
@@ -352,17 +380,31 @@ def collect_usage(
                     if sid not in by_session:
                         by_session[sid] = _empty_bucket()
                         by_session[sid]["model_counts"] = defaultdict(int)
+                        by_session[sid]["by_model"] = defaultdict(_empty_bucket)
                     _add(by_session[sid], call, sid)
                     by_session[sid]["model_counts"][call["model"]] += 1
+                    _add(by_session[sid]["by_model"][call["model"]], call, sid)
                     _add(totals, call, sid)
         except OSError:
             errors += 1
 
     if owners is None:
         owners = read_session_owners(resolved.db_path) if resolved.db_path.exists() else {}
+    prices_section = rates.api_unit_prices if rates else {}
     for sid, b in by_session.items():
         b["user_id"] = owners.get(sid, "")
         b["model_counts"] = dict(b.get("model_counts") or {})
+        b["by_model"] = dict(b.get("by_model") or {})
+        usages = [
+            {
+                "model": name,
+                "uncached_input": mb["uncached_input"],
+                "cache_hit_tokens": mb["cache_hit_tokens"],
+                "completion_tokens": mb["completion_tokens"],
+            }
+            for name, mb in b["by_model"].items()
+        ]
+        b["official"] = official_cost_by_models(usages, prices_section)
 
     ledger = read_session_usage_credits(resolved.db_path)
     cross = _cross_check(by_session, ledger)
