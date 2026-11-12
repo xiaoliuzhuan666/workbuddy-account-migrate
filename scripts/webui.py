@@ -42,6 +42,9 @@ from workbuddy_core.security import (  # noqa: E402
     token_matches,
 )
 from workbuddy_core.usage import collect_usage  # noqa: E402
+from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny  # noqa: E402
+from workbuddy_core.volc_afp import coef_for_model  # noqa: E402
+from workbuddy_core.rates import NOT_FOUND  # noqa: E402
 
 CONFIRM_TEXT = "确认同步"
 DEFAULT_PORT = 18765
@@ -188,6 +191,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/rates":
                 rates = load_rates(STATE.rates_path)
                 return self._send_json(200, {"ok": True, "rates": rates.as_public_dict()})
+            if path == "/api/prices":
+                return self._send_json(200, self._prices())
+            if path == "/api/compare":
+                return self._send_json(200, self._compare(q))
             if path == "/api/sync/preflight":
                 resolved = STATE.resolved(q.get("edition"))
                 pf = preflight(STATE.home, resolved.path)
@@ -209,6 +216,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._security_gate(writing=True):
             return
         path, q = self._query()
+        if path == "/api/prices/refresh":
+            # 练手 3：骨架先返回 501，权限门已经走过（令牌 + Host）
+            return self._send_json(501, {
+                "ok": False,
+                "error": "not_implemented",
+                "message": "从本地 catalog.json 刷新价格留给练手实现。测试见 tests/run_webui_tests.py。失败时不得覆盖旧表。",
+            })
         if path != "/api/sync":
             self._send_json(404, {"ok": False, "error": "not_found"})
             return
@@ -313,6 +327,54 @@ class Handler(BaseHTTPRequestHandler):
         # 会话明细很大，用量接口只保留汇总；完整会话走 /api/sessions
         payload.pop("session_usage", None)
         return payload
+
+
+    def _prices(self):
+        rates = load_rates(STATE.rates_path)
+        return {
+            "ok": True,
+            "pricing_policy": rates.pricing_policy,
+            "api_unit_prices": rates.api_unit_prices,
+            "volc_afp": rates.volc_afp,
+            "notes": rates.notes,
+            "path": str(STATE.rates_path),
+        }
+
+    def _compare(self, q):
+        model = (q.get("model") or "").strip()
+        if not model:
+            return {"ok": False, "error": "bad_request", "message": "请提供 model 参数。"}
+        resolved = STATE.resolved(q.get("edition"))
+        conv = q.get("conversion") or None
+        rates = load_rates(STATE.rates_path)
+        usage = collect_usage(resolved, rates=rates, conversion_key=conv)
+        row = None
+        for r in usage.by_model:
+            if r.get("model") == model:
+                row = r
+                break
+        if not row:
+            return {"ok": True, "model": model, "found": False, "message": "本机用量里没有这个模型。"}
+        return {
+            "ok": True,
+            "found": True,
+            "model": model,
+            "actual_credit": row.get("credit"),
+            "package_cny": row.get("estimated_cny"),
+            "package_cny_status": row.get("estimated_cny_status"),
+            "inference": row.get("inference"),
+            "equivalent_cny": row.get("equivalent_cny"),
+            "equivalent_cny_status": row.get("equivalent_cny_status"),
+            "equivalent_cny_reason": row.get("equivalent_cny_reason"),
+            "equivalent_cny_source": row.get("equivalent_cny_source"),
+            "afp": row.get("afp"),
+            "tokens": {
+                "uncached_input": row.get("uncached_input"),
+                "cache_hit_tokens": row.get("cache_hit_tokens"),
+                "completion_tokens": row.get("completion_tokens"),
+                "prompt_tokens": row.get("prompt_tokens"),
+            },
+        }
 
     def _send_static(self, name: str):
         # 禁止路径穿越

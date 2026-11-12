@@ -36,6 +36,12 @@ from workbuddy_core.security import (
     origin_is_allowed,
 )
 from workbuddy_core.usage import collect_usage, parse_raw_usage_line, _uncached_input
+from workbuddy_core.inference import (
+    fit_credit_rates, infer_for_model, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT,
+)
+from workbuddy_core.volc_afp import afp_for_tokens, coef_for_model
+from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny
+from workbuddy_core.rates import NOT_FOUND
 
 PASSED = 0
 FAILED = 0
@@ -500,6 +506,104 @@ def test_bind_cli():
     check("提示拒绝绑定", "拒绝" in (r.stderr + r.stdout))
 
 
+
+def test_inference_afp_equivalent():
+    print("\n[反推 / AFP / 等效人民币]")
+    # 已知公式 credit = 1e-5 * u + 1e-6 * h + 4e-5 * o，40 个点，应可靠拟合
+    rows = []
+    # 三项要各自独立变化，避免共线导致拟合出负单价
+    for i in range(40):
+        u = 800.0 + (i % 7) * 900
+        h = 200.0 + (i % 5) * 2500
+        o = 40.0 + (i % 11) * 70
+        cr = 1e-5 * u + 1e-6 * h + 4e-5 * o
+        rows.append((u, h, o, cr))
+    fitted = fit_credit_rates(rows, min_calls=30, min_r2=0.95)
+    check("样本足够时三项拟合成功", fitted["status"] == "ok", str(fitted))
+    tpc = fitted.get("tokens_per_credit") or {}
+    # 1/1e-5 = 100000, 1/1e-6=1e6, 1/4e-5=25000
+    check("未命中输入每积分约 10 万", tpc.get("uncached_input") and abs(tpc["uncached_input"] - 100000) / 100000 < 0.01, str(tpc))
+    check("输出每积分约 2.5 万", tpc.get("output") and abs(tpc["output"] - 25000) / 25000 < 0.01, str(tpc))
+    check("反推结果不是禁止的 5 万默认值", all(
+        v is None or abs(v - FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT) > 1 for v in tpc.values()
+    ), str(tpc))
+
+    few = infer_for_model(
+        [{"uncached_input": 100, "cache_hit_tokens": 10, "completion_tokens": 5, "credit": 1, "total_tokens": 115}],
+        min_calls=30,
+    )
+    check("样本不足标没读到", few["status"] == NOT_FOUND)
+    check("样本不足不回退 5 万", few["tokens_per_credit"]["uncached_input"] != FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT)
+    check("样本不足三项都是空", all(v is None for v in few["tokens_per_credit"].values()))
+
+    # 官方示例：(50000*2.5 + 500*2.5)/10000 = 12.625
+    ex = afp_for_tokens(50000, 500, 2.5, 2.5)
+    check("AFP 官方示例 12.625", ex["status"] == "ok" and abs(ex["afp"] - 12.625) < 1e-9, str(ex))
+    miss = afp_for_tokens(100, 10, None, 0.5)
+    check("缺系数 AFP 没读到", miss["status"] == NOT_FOUND and miss["afp"] is None)
+
+    rates = load_rates(ROOT / "config" / "model_rates.json")
+    coef = coef_for_model(rates.volc_afp, "deepseek-v4.1-flash")
+    check("官文核对过的 v4.1-flash 系数 0.875", coef["status"] == "ok" and abs(coef["input_coef"] - 0.875) < 1e-12)
+    coef2 = coef_for_model(rates.volc_afp, "some-unknown-model")
+    check("未知模型 AFP 没读到", coef2["status"] == NOT_FOUND)
+
+    pr = lookup_unit_price(rates.api_unit_prices, "deepseek-v4-flash")
+    check("v4-flash 有闲时人民币单价", pr["status"] == "ok" and pr["input"] == 1 and pr["cached_read"] == 0.02)
+    # 100 万未命中 + 0 缓存 + 0 输出 = 1 元
+    eq = equivalent_cny(1_000_000, 0, 0, pr, use_peak=False)
+    check("等效人民币闲时 100 万输入 = 1 元", eq["status"] == "ok" and abs(eq["cny"] - 1) < 1e-9, str(eq))
+    eqp = equivalent_cny(1_000_000, 0, 0, pr, use_peak=True)
+    check("高峰 100 万输入 = 2 元", eqp["status"] == "ok" and abs(eqp["cny"] - 2) < 1e-9, str(eqp))
+    pr_miss = lookup_unit_price(rates.api_unit_prices, "glm-5.3-flash")
+    check("glm-5.3-flash 人民币单价没读到", pr_miss["status"] == NOT_FOUND)
+    eqm = equivalent_cny(1000, 100, 10, pr_miss)
+    check("没读到单价时等效费用不是 0 而是没读到", eqm["status"] == NOT_FOUND and eqm["cny"] is None)
+    pr41 = lookup_unit_price(rates.api_unit_prices, "deepseek-v4.1-flash")
+    check("不把 v4-flash 的价套到 v4.1-flash", pr41["status"] == NOT_FOUND)
+
+    # 在完整 fixture 上：glm-5.1 无 API 价；用量接口应带 inference 字段
+    home, _, _ = make_home()
+    resolved = resolve_workbuddy(home=home)
+    report = collect_usage(resolved, rates=rates, conversion_key="topup_pack")
+    models = {r["model"]: r for r in report.by_model}
+    check("用量行带 inference", "inference" in models["glm-5.1"])
+    check("fixture 样本不足时 inference 没读到", models["glm-5.1"]["inference"]["status"] == NOT_FOUND)
+    check("fixture 不出现 5 万默认", models["glm-5.1"]["inference"]["tokens_per_credit"]["uncached_input"] is None)
+    check("glm-5.1 无精确 API 价则等效没读到", models["glm-5.1"]["equivalent_cny_status"] == NOT_FOUND)
+    # 合计 equivalent：fixture 模型都没对上已核对单价（kimi-k2.6 不在表里；deepseek-v4.1-flash 没读到；glm-5.1 不在 api 表）
+    check("全部缺价时总等效没读到", report.totals.get("equivalent_cny_status") == NOT_FOUND)
+
+
+def test_prices_api_and_refresh_skeleton():
+    print("\n[价格 API 与刷新骨架]")
+    home, _, _ = make_home()
+    token_file = home / ".config" / "workbuddy-account-migrate" / "webui-token"
+    httpd, port, token = _start_server(home, token_file)
+    try:
+        st, obj, raw = _req(port, "GET", "/api/prices")
+        check("GET /api/prices 200", st == 200 and obj.get("ok"))
+        blob = raw.decode("utf-8")
+        check("价格接口含 ModelLink 政策", "ModelLink" in blob)
+        check("价格接口不含令牌内容", token not in blob)
+        models = ((obj.get("api_unit_prices") or {}).get("models") or [])
+        flash = next((m for m in models if m.get("id") == "glm-5.3-flash"), None)
+        check("glm-5.3-flash 在表里且没读到", flash and flash.get("status") == NOT_FOUND)
+        st, obj, _ = _req(port, "GET", "/api/compare?model=glm-5.1")
+        check("GET /api/compare 200", st == 200 and obj.get("ok"))
+        # 无令牌刷新
+        st, obj, _ = _req(port, "POST", "/api/prices/refresh", body={})
+        check("无令牌刷新 401", st == 401)
+        st, obj, _ = _req(port, "POST", "/api/prices/refresh", headers={
+            "Authorization": "Bearer " + token,
+            "Origin": "http://127.0.0.1:%d" % port,
+        }, body={"confirm": True})
+        check("有令牌时刷新骨架 501（留给练手 3）", st == 501, str((st, obj)))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def main():
     print("workbuddy 本机网页版测试")
     print("仓库：%s" % ROOT)
@@ -512,6 +616,8 @@ def main():
         test_codebuddy,
         test_token_file,
         test_http,
+        test_inference_afp_equivalent,
+        test_prices_api_and_refresh_skeleton,
         test_bind_cli,
     ):
         try:

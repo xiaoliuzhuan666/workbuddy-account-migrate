@@ -44,6 +44,10 @@ class RatesConfig:
     conversions: Dict[str, Conversion] = field(default_factory=dict)
     official_multipliers: Dict[str, Any] = field(default_factory=dict)
     per_million: Dict[str, Any] = field(default_factory=dict)
+    api_unit_prices: Dict[str, Any] = field(default_factory=dict)
+    volc_afp: Dict[str, Any] = field(default_factory=dict)
+    inference: Dict[str, Any] = field(default_factory=dict)
+    pricing_policy: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     def conversion(self, key: Optional[str] = None) -> Optional[Conversion]:
@@ -95,6 +99,10 @@ class RatesConfig:
             "conversions": {k: v.as_dict() for k, v in self.conversions.items()},
             "official_multipliers": self.official_multipliers,
             "per_million_token_credits": self.per_million,
+            "api_unit_prices": self.api_unit_prices,
+            "volc_afp": self.volc_afp,
+            "inference": self.inference,
+            "pricing_policy": self.pricing_policy,
         }
 
 
@@ -153,6 +161,10 @@ def load_rates(path: Path) -> RatesConfig:
         conversions=conversions,
         official_multipliers=raw.get("official_multipliers") or {},
         per_million=raw.get("per_million_token_credits") or {},
+        api_unit_prices=raw.get("api_unit_prices") or {},
+        volc_afp=raw.get("volc_afp") or {},
+        inference=raw.get("inference") or {},
+        pricing_policy=raw.get("pricing_policy") or {},
         notes=raw.get("notes") or "",
     )
 

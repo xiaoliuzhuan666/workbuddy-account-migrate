@@ -71,6 +71,10 @@ python3 scripts/webui.py --init-token
 - 用量默认只读，不改登录态文件（不会动 `account-snapshot.json`）。
 - 日志会脱敏，不打印令牌内容。
 
+## 价格口径（阶段 B）
+
+主表同时展示两列费用：按 WorkBuddy 官方加量包/订阅把**实际积分**折成人民币，以及把同一批 token 按 **ModelLink / 官文 API 单价**折成等效人民币。WorkBuddy「每积分多少 token」只从本机 jsonl 反推，并拆开缓存命中、未命中和输出；样本不足标「没读到」，**不会**使用社区插件的 5 万默认值。火山 AFP 按官方公式，系数在 `config/model_rates.json`，带来源和日期。详见 [local-webui-plan.md](local-webui-plan.md)。
+
 ## 价格表
 
 `config/model_rates.json` 可以改。里面已经写入 2026-11-12 从官方页面核对过的数字：

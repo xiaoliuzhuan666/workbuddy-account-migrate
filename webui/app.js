@@ -121,10 +121,10 @@
     const items = [
       ["模型调用", fmt(t.calls, 0)],
       ["实际积分", fmt(t.credit, 2)],
-      ["估算费用（元）", t.estimated_cny == null ? "没读到" : "¥ " + fmt(t.estimated_cny, 2)],
+      ["套餐折算（元）", t.estimated_cny == null ? "没读到" : "¥ " + fmt(t.estimated_cny, 2)],
+      ["API 等效（元）", t.equivalent_cny == null ? "没读到" : "¥ " + fmt(t.equivalent_cny, 2)],
       ["缓存命中率", pct(t.cache_hit_rate)],
       ["去缓存效率", t.tokens_per_credit_uncached == null ? "没读到" : fmt(t.tokens_per_credit_uncached, 0) + " token/积分"],
-      ["会话文件", fmt(t.files_scanned, 0)],
     ];
     $("stats").innerHTML = items
       .map(([l, n]) => '<div class="stat"><div class="n">' + escapeHtml(n) + '</div><div class="l">' + escapeHtml(l) + "</div></div>")
@@ -135,7 +135,7 @@
     const tb = $("model-table").querySelector("tbody");
     const rows = usage.by_model || [];
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="11" class="empty">这个数据目录里还没有读到 rawUsage。</td></tr>';
+      tb.innerHTML = '<tr><td colspan="14" class="empty">这个数据目录里还没有读到 rawUsage。</td></tr>';
       return;
     }
     tb.innerHTML = rows
@@ -148,8 +148,14 @@
           r.estimated_cny_status === "没读到" || r.estimated_cny == null
             ? "没读到"
             : "¥ " + fmt(r.estimated_cny, 2);
-        const unc = r.tokens_per_credit_uncached == null ? "没读到" : fmt(r.tokens_per_credit_uncached, 0);
-        const tot = r.tokens_per_credit_total == null ? "没读到" : fmt(r.tokens_per_credit_total, 0);
+        const inf = r.inference || {};
+        const tpc = (inf.status === "ok" && inf.tokens_per_credit) ? inf.tokens_per_credit : null;
+        const cellInf = (k) => {
+          if (!tpc || tpc[k] == null) return "没读到";
+          return fmt(tpc[k], 0);
+        };
+        const eq = (r.equivalent_cny_status === "没读到" || r.equivalent_cny == null)
+          ? "没读到" : "¥ " + fmt(r.equivalent_cny, 2);
         return (
           "<tr>" +
           "<td>" + escapeHtml(r.model) + "</td>" +
@@ -158,10 +164,13 @@
           '<td class="num">' + fmt(r.completion_tokens, 0) + "</td>" +
           '<td class="num">' + fmt(r.thinking_tokens, 0) + "</td>" +
           '<td class="num">' + pct(r.cache_hit_rate) + "</td>" +
-          '<td class="num">' + escapeHtml(unc) + "</td>" +
-          '<td class="num">' + escapeHtml(tot) + "</td>" +
+          '<td class="num">' + (r.tokens_per_credit_uncached == null ? "没读到" : fmt(r.tokens_per_credit_uncached, 0)) + "</td>" +
           '<td class="num">' + fmt(r.credit, 2) + "</td>" +
           '<td class="num">' + escapeHtml(cny) + "</td>" +
+          '<td class="num">' + escapeHtml(eq) + "</td>" +
+          '<td class="num">' + escapeHtml(cellInf("uncached_input")) + "</td>" +
+          '<td class="num">' + escapeHtml(cellInf("cache_hit")) + "</td>" +
+          '<td class="num">' + escapeHtml(cellInf("output")) + "</td>" +
           "<td>" + escapeHtml(mul) + "</td>" +
           "</tr>"
         );
@@ -169,6 +178,54 @@
       .join("");
     const cc = usage.cross_check || {};
     $("cross-check").textContent = cc.summary || "";
+  }
+
+
+  function fillPrices(usage) {
+    const rates = (usage && usage.rates) || {};
+    const prices = (rates.api_unit_prices || {}).models || [];
+    const tb = document.querySelector("#price-table tbody");
+    if (tb) {
+      if (!prices.length) {
+        tb.innerHTML = '<tr><td colspan="6" class="empty">价格表里还没有按量单价。</td></tr>';
+      } else {
+        tb.innerHTML = prices.map((e) => {
+          const miss = e.status === "没读到";
+          const cell = (k) => (miss || e[k] == null || e[k] === "没读到") ? "没读到" : fmt(e[k], 4);
+          return "<tr><td>" + escapeHtml(e.id || "") + "</td>" +
+            '<td class="num">' + cell("input") + "</td>" +
+            '<td class="num">' + cell("output") + "</td>" +
+            '<td class="num">' + cell("cached_read") + "</td>" +
+            "<td>" + escapeHtml(e.source_via || e.source || "") + "</td>" +
+            "<td>" + escapeHtml(e.retrieved_at || "") + "</td></tr>";
+        }).join("");
+      }
+    }
+    const afp = rates.volc_afp || {};
+    const atb = document.querySelector("#afp-table tbody");
+    const models = afp.models || {};
+    const names = Object.keys(models);
+    if (atb) {
+      if (!names.length) {
+        atb.innerHTML = '<tr><td colspan="4" class="empty">没有已核对的 AFP 系数。</td></tr>';
+      } else {
+        atb.innerHTML = names.map((n) => {
+          const m = models[n] || {};
+          const miss = m.status === "没读到";
+          const note = (m.limited_offer ? "限时折扣 " : "") + (m.note || "");
+          return "<tr><td>" + escapeHtml(n) + "</td>" +
+            '<td class="num">' + (miss || m.input_coef == null ? "没读到" : m.input_coef) + "</td>" +
+            '<td class="num">' + (miss || m.output_coef == null ? "没读到" : m.output_coef) + "</td>" +
+            "<td>" + escapeHtml(note) + "</td></tr>";
+        }).join("");
+      }
+    }
+    const f = document.getElementById("afp-formula");
+    if (f) {
+      f.textContent = (afp.formula || "") +
+        (afp.source ? " 来源：" + afp.source : "") +
+        (afp.retrieved_at ? "（取自 " + afp.retrieved_at + "）" : "");
+    }
   }
 
   function fillCodebuddy(cb) {
@@ -358,6 +415,7 @@
       fillRates(usage);
       fillStats(usage);
       fillModels(usage);
+      fillPrices(usage);
       fillCodebuddy(usage.codebuddy);
       fillSessions(sessions.sessions || []);
       fillAccounts(accounts);

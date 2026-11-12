@@ -43,9 +43,12 @@
               <th class="num">思考 token</th>
               <th class="num">缓存命中率</th>
               <th class="num">去缓存效率</th>
-              <th class="num">总 token / 积分</th>
               <th class="num">实际积分</th>
-              <th class="num">估算费用</th>
+              <th class="num">套餐折算</th>
+              <th class="num">API 等效人民币</th>
+              <th class="num">每积分·未命中</th>
+              <th class="num">每积分·缓存</th>
+              <th class="num">每积分·输出</th>
               <th>官方倍率</th>
             </tr>
           </thead>
@@ -53,6 +56,28 @@
         </table>
       </div>
       <p class="footnote" id="cross-check"></p>
+    </section>
+
+    <section class="panel" id="prices-panel">
+      <h2>官方价与 AFP</h2>
+      <p class="footnote">价格主源是 ModelLink（人民币，含缓存和峰谷）。没核实到的格子写「没读到」。火山 AFP 用官方公式（输入×系数 + 输出×系数）÷ 10000。这一块的样式你也可以按练手 2 自己改。</p>
+      <div class="split">
+        <div>
+          <h3 class="sub">按量单价（元 / 百万 token）</h3>
+          <div class="table-wrap"><table id="price-table">
+            <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th><th>日期</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+        <div>
+          <h3 class="sub">火山 AFP 系数</h3>
+          <div class="table-wrap"><table id="afp-table">
+            <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+          <p class="footnote" id="afp-formula"></p>
+        </div>
+      </div>
     </section>
 
     <section class="panel" id="codebuddy-panel">

@@ -28,6 +28,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .paths import ResolvedDir, open_db_readonly
 from .rates import NOT_FOUND, RatesConfig
+from .inference import infer_for_model, DEFAULT_MIN_CALLS, DEFAULT_MIN_R2, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT
+from .equivalent_cost import lookup_unit_price, equivalent_cny
+from .volc_afp import afp_for_tokens, coef_for_model
 
 # 与上游 usage-status 一致的字段名
 _HIT_KEYS = (
@@ -326,6 +329,7 @@ def collect_usage(
         )
 
     by_model = defaultdict(_empty_bucket)
+    by_model_calls = defaultdict(list)
     by_session: Dict[str, dict] = {}
     totals = _empty_bucket()
     files = 0
@@ -344,6 +348,7 @@ def collect_usage(
                         continue
                     calls += 1
                     _add(by_model[call["model"]], call, sid)
+                    by_model_calls[call["model"]].append(call)
                     if sid not in by_session:
                         by_session[sid] = _empty_bucket()
                         by_session[sid]["model_counts"] = defaultdict(int)
@@ -376,8 +381,55 @@ def collect_usage(
         else:
             row["rate_table_estimated_credit"] = None
             row["rate_table_status"] = NOT_FOUND
+        min_c = DEFAULT_MIN_CALLS
+        min_r = DEFAULT_MIN_R2
+        if rates and rates.inference:
+            min_c = int(rates.inference.get("min_calls") or min_c)
+            min_r = float(rates.inference.get("min_r2") or min_r)
+        inf = infer_for_model(by_model_calls.get(name) or [], min_calls=min_c, min_r2=min_r)
+        row["inference"] = inf
+        price = lookup_unit_price(rates.api_unit_prices if rates else {}, name) if rates else {"status": NOT_FOUND, "reason": "没有价格表"}
+        eq = equivalent_cny(b["uncached_input"], b["cache_hit_tokens"], b["completion_tokens"], price, use_peak=False)
+        if eq.get("status") == "ok":
+            eq["period_note"] = "默认按闲时/标准价；本地记录未区分高峰。"
+        row["equivalent_cny"] = eq.get("cny")
+        row["equivalent_cny_status"] = eq.get("status")
+        row["equivalent_cny_reason"] = eq.get("reason") or ""
+        row["equivalent_cny_source"] = eq.get("source") or ""
+        row["equivalent_cny_retrieved_at"] = eq.get("retrieved_at") or ""
+        afp_meta = coef_for_model(rates.volc_afp if rates else {}, name) if rates else {"status": NOT_FOUND}
+        # AFP 用全部输入（含缓存）按官文「输入 token」；官文未单独写缓存，注明这一点
+        afp = afp_for_tokens(
+            b["prompt_tokens"], b["completion_tokens"],
+            afp_meta.get("input_coef"), afp_meta.get("output_coef"),
+        )
+        if afp.get("status") == "ok":
+            afp["note"] = (afp_meta.get("note") or "") + " 官文输入系数按全部输入 token；未单独说明缓存命中。"
+            afp["source"] = afp_meta.get("source")
+            afp["retrieved_at"] = afp_meta.get("retrieved_at")
+            afp["limited_offer"] = afp_meta.get("limited_offer")
+        else:
+            afp["source"] = afp_meta.get("source") or ""
+            afp["retrieved_at"] = afp_meta.get("retrieved_at") or ""
+        row["afp"] = afp
         model_rows.append(row)
     model_rows.sort(key=lambda r: (-r["credit"], -r["calls"], r["model"]))
+
+    eq_sum = 0.0
+    eq_ok = 0
+    eq_miss = 0
+    for r in model_rows:
+        if r.get("equivalent_cny_status") == "ok" and r.get("equivalent_cny") is not None:
+            eq_sum += r["equivalent_cny"]
+            eq_ok += 1
+        else:
+            eq_miss += 1
+    if eq_ok and not eq_miss:
+        eq_total, eq_status, eq_note = round(eq_sum, 4), "ok", "全部模型都有已核对的官方单价。"
+    elif eq_ok:
+        eq_total, eq_status, eq_note = round(eq_sum, 4), "partial", "只加总了有官方单价的模型，其余为没读到，不是全部用量。"
+    else:
+        eq_total, eq_status, eq_note = None, NOT_FOUND, "没有模型能按官方 API 单价折算。"
 
     report = UsageReport(
         source="workbuddy-jsonl",
@@ -393,6 +445,9 @@ def collect_usage(
     report.totals["files_scanned"] = files
     report.totals["parse_errors"] = errors
     report.totals["model_count"] = len(model_rows)
+    report.totals["equivalent_cny"] = eq_total
+    report.totals["equivalent_cny_status"] = eq_status
+    report.totals["equivalent_cny_note"] = eq_note
     return report
 
 
