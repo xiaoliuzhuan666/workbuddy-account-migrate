@@ -215,7 +215,7 @@
     return PAGES.indexOf(h) >= 0 ? h : "accounts";
   }
   const PAGE_META = {
-    accounts: { title: "账号同步", lede: "查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。" },
+    accounts: { title: "账号", lede: "本机工作台：合并账号、备份回滚、跨版本对话、跨设备项目、历史任务和诊断。" },
     tokens: { title: "Token 统计", lede: "本机 jsonl 的 Token 与调用统计。" },
     credits: { title: "积分与价格", lede: "积分换 token 只从本机 jsonl 三项反推。价格来自可编辑配置，没核实到的格子写「没读到」。" },
     sessions: { title: "会话", lede: "本机会话和每次调用的时间、用量。不含对话正文。合计覆盖全部会话。" },
@@ -291,9 +291,16 @@
       box.hidden = true;
       box.innerHTML = "";
     }
+    const tp = $("sync-token-path");
+    if (tp && meta.token_path) {
+      tp.textContent = "令牌文件在：" + meta.token_path + "（只显示路径，请在本机终端查看内容）";
+    }
+    const rw = $("sync-restart-wrap");
+    if (rw) rw.hidden = !meta.restart_supported;
   }
 
   /* ---------- 账号页 ---------- */
+
   function accountUsage(uid) {
     const acc = { credit: 0, calls: 0, prompt: 0, completion: 0, sessions: 0 };
     (state.sessions || []).forEach((s) => {
@@ -308,10 +315,21 @@
     return acc;
   }
 
-  function fillAccounts(data) {
-    state.accounts = (data && data.accounts) || [];
+  function accountLabel(a) {
+    if (!a) return "—";
+    return a.nickname || a.display_id || "未命名账号";
+  }
+
+  function memOf(a) {
+    return (a && (a.memory_display || (a.memory_bytes ? String(a.memory_bytes) : "—"))) || "—";
+  }
+
+  function fillAccountSelects() {
     const src = $("sync-source");
     const tgt = $("sync-target");
+    if (!src || !tgt) return;
+    const prevS = src.value;
+    const prevT = tgt.value;
     const opts = state.accounts
       .map((a) => {
         const label =
@@ -326,9 +344,39 @@
     tgt.innerHTML = opts;
     const current = state.accounts.find((a) => a.is_current);
     const other = state.accounts.find((a) => current && a.user_id !== current.user_id) || state.accounts[0];
-    if (other) src.value = other.user_id;
-    if (current) tgt.value = current.user_id;
+    src.value = prevS || (other && other.user_id) || "";
+    tgt.value = prevT || (current && current.user_id) || "";
+    if (src.value && src.value === tgt.value && other && current) {
+      src.value = other.user_id;
+      tgt.value = current.user_id;
+    }
+  }
 
+  function setSyncRole(uid, role) {
+    if (role === "src") $("sync-source").value = uid;
+    if (role === "tgt") $("sync-target").value = uid;
+    syncReady();
+    paintAccountRoles();
+  }
+
+  function paintAccountRoles() {
+    const srcId = ($("sync-source") && $("sync-source").value) || "";
+    const tgtId = ($("sync-target") && $("sync-target").value) || "";
+    document.querySelectorAll("#account-grid .account-card[data-uid]").forEach((el) => {
+      const uid = el.getAttribute("data-uid");
+      el.classList.toggle("is-src", uid === srcId);
+      el.classList.toggle("is-tgt", uid === tgtId && uid !== srcId);
+      const bs = el.querySelector("[data-role=src]");
+      const bt = el.querySelector("[data-role=tgt]");
+      if (bs) bs.classList.toggle("is-on", uid === srcId);
+      if (bt) bt.classList.toggle("is-on-tgt", uid === tgtId);
+    });
+  }
+
+  function fillAccounts(data) {
+    state.accounts = (data && data.accounts) || [];
+    state.login = (data && data.login) || state.login || {};
+    fillAccountSelects();
     $("account-count").textContent = String(state.accounts.length);
     const grid = $("account-grid");
     if (!state.accounts.length) {
@@ -336,7 +384,7 @@
         '<div class="empty-state tall">' +
         '<div class="empty-ico" aria-hidden="true">◎</div>' +
         '<p class="empty-title">还没有账号</p>' +
-        '<p class="empty-desc">这个数据目录里还没有读到账号。同步之前需要本机至少有两个账号。</p></div>';
+        '<p class="empty-desc">这个数据目录里还没有读到账号。可以先打开「诊断」看看登录态，或到会话页查看用量。</p></div>';
       updateSyncPreview();
       return;
     }
@@ -349,8 +397,9 @@
           ? '<span class="badge badge-on">当前登录</span>'
           : '<span class="badge">本机记录</span>';
         const nSess = a.session_count || u.sessions || 0;
+        const mcp = a.mcp_servers != null ? a.mcp_servers : "—";
         return (
-          '<article class="account-card">' +
+          '<article class="account-card" data-uid="' + escapeHtml(a.user_id) + '">' +
           '<div class="account-card-head">' +
             '<div class="avatar" aria-hidden="true">' + escapeHtml(initial) + "</div>" +
             "<div class='account-who'><div class='account-name'>" + escapeHtml(title) + "</div>" +
@@ -358,13 +407,16 @@
             badge +
           "</div>" +
           '<div class="account-stats">' +
-            "<div><span class='n'>" + escapeHtml(fmt(u.credit, 2)) + "</span><span class='u'>积分</span></div>" +
             "<div><span class='n'>" + escapeHtml(String(nSess)) + "</span><span class='u'>会话</span></div>" +
-            "<div><span class='n'>" + escapeHtml(fmt(u.calls, 0)) + "</span><span class='u'>调用</span></div>" +
-            "<div><span class='n'>" + escapeHtml(compact(u.prompt)) + "</span><span class='u'>输入</span></div>" +
-            "<div><span class='n'>" + escapeHtml(compact(u.completion)) + "</span><span class='u'>输出</span></div>" +
+            "<div><span class='n'>" + escapeHtml(memOf(a)) + "</span><span class='u'>记忆</span></div>" +
+            "<div><span class='n'>" + escapeHtml(String(mcp)) + "</span><span class='u'>MCP</span></div>" +
+            "<div><span class='n'>" + escapeHtml(fmt(u.credit, 2)) + "</span><span class='u'>积分</span></div>" +
           "</div>" +
-          '<a class="account-link" href="#/sessions" data-filter="' + escapeHtml(a.display_id) + '">查看会话</a>' +
+          '<div class="roles">' +
+            '<button type="button" data-role="src">作为源</button>' +
+            '<button type="button" data-role="tgt">作为目标</button>' +
+            '<a class="account-link" href="#/sessions" data-filter="' + escapeHtml(a.display_id) + '">查看会话</a>' +
+          "</div>" +
           "</article>"
         );
       })
@@ -376,16 +428,20 @@
         renderSessions();
       });
     });
+    grid.querySelectorAll("button[data-role]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const card = btn.closest("[data-uid]");
+        if (card) setSyncRole(card.getAttribute("data-uid"), btn.getAttribute("data-role"));
+      });
+    });
     updateSyncPreview();
-  }
-
-  function accountLabel(a) {
-    if (!a) return "—";
-    return a.nickname || a.display_id || "未命名账号";
+    paintAccountRoles();
   }
 
   function updateSyncPreview() {
     const el = $("sync-preview");
+    const warn = $("sync-login-warn");
     if (!el) return;
     const srcId = ($("sync-source") && $("sync-source").value) || "";
     const tgtId = ($("sync-target") && $("sync-target").value) || "";
@@ -393,29 +449,68 @@
     const tgt = (state.accounts || []).find((a) => a.user_id === tgtId);
     if (!(state.accounts || []).length) {
       el.className = "sync-preview is-muted";
-      el.textContent = "还没有可同步的账号。";
+      el.textContent = "这个目录里还没有账号。";
+      if (warn) warn.hidden = true;
       return;
     }
-    if (!src || !tgt) {
+    if ((state.accounts || []).length < 2) {
       el.className = "sync-preview is-muted";
-      el.textContent = "选好两个不同的账号后，这里会预览将要合并的会话和调用数量。";
+      el.innerHTML =
+        "本版本只发现 <strong>1</strong> 个账号，无法做整账号合并。可以打开「诊断」确认另一版本是否还有数据，或用「跨版本对话 / 跨设备项目」。";
+      if (warn) warn.hidden = true;
       return;
     }
-    if (srcId === tgtId) {
+    if (!srcId || !tgtId || srcId === tgtId) {
       el.className = "sync-preview is-warn";
-      el.textContent = "源账号和目标账号不能相同。请另选一个目标。";
+      el.textContent = "请选择两个不同的账号。可在左侧卡片上点「作为源」或「作为目标」。";
+      if (warn) warn.hidden = true;
       return;
     }
-    const su = accountUsage(srcId);
-    const tu = accountUsage(tgtId);
-    const nS = src.session_count || su.sessions || 0;
-    const nT = tgt.session_count || tu.sessions || 0;
+    const cached = state.syncPreview;
+    if (cached && cached._src === srcId && cached._tgt === tgtId) {
+      renderPreview(cached);
+      return;
+    }
+    el.className = "sync-preview is-muted";
+    el.textContent = "正在生成预览…";
+    get("/api/sync/preview" + qed() + (qed() ? "&" : "?") + "source_uid=" + encodeURIComponent(srcId) + "&target_uid=" + encodeURIComponent(tgtId))
+      .then((data) => {
+        data._src = srcId;
+        data._tgt = tgtId;
+        state.syncPreview = data;
+        if (($("sync-source").value === srcId) && ($("sync-target").value === tgtId)) renderPreview(data);
+      })
+      .catch((e) => {
+        el.className = "sync-preview is-warn";
+        el.textContent = e.message || "预览失败";
+      });
+  }
+
+  function renderPreview(data) {
+    const el = $("sync-preview");
+    const warn = $("sync-login-warn");
+    if (!data || !data.ok) {
+      el.className = "sync-preview is-warn";
+      el.textContent = (data && (data.message || data.error)) || "预览失败";
+      if (warn) warn.hidden = true;
+      return;
+    }
+    if (warn) {
+      const msg = data.warning || data.login_conflict_message || "";
+      warn.hidden = !msg;
+      warn.textContent = msg;
+    }
+    const rows = (data.rows || []).map((r) =>
+      "<tr><td>" + escapeHtml(r.item) + '</td><td class="num">' + escapeHtml(String(r.source)) +
+      '</td><td class="num">' + escapeHtml(String(r.target)) + "</td><td>" + escapeHtml(r.action) + "</td></tr>"
+    ).join("");
+    const steps = (data.steps || []).map((s) => "<li>" + escapeHtml(s) + "</li>").join("");
     el.className = "sync-preview";
     el.innerHTML =
-      "将把 <strong>" + escapeHtml(accountLabel(src)) + "</strong> 的 " +
-      escapeHtml(String(nS)) + " 个会话、" + escapeHtml(fmt(su.calls, 0)) +
-      " 次调用合并到 <strong>" + escapeHtml(accountLabel(tgt)) +
-      "</strong>（目前 " + escapeHtml(String(nT)) + " 个会话）。会先备份，再合并。";
+      '<table class="wb-preview-table"><thead><tr><th>将合并的内容</th><th class="num">源里有</th><th class="num">目标现在</th><th>做法</th></tr></thead><tbody>' +
+      rows + "</tbody></table>" +
+      (steps ? '<ol class="wb-steps">' + steps + "</ol>" : "") +
+      '<p class="sync-backup-note" style="margin:8px 0 0">执行前会先备份（库、记忆、连接器），完成后会给出备份标签，可在「备份与回滚」里还原。不会改登录态。</p>';
   }
 
   async function fillPreflight() {
@@ -454,16 +549,53 @@
     syncReady();
   }
 
+  function confirmOf(key, fallback) {
+    const texts = (state.meta && state.meta.confirm_texts) || {};
+    return texts[key] || (state.meta && state.meta.confirm_text) || fallback;
+  }
+
   function syncReady() {
+    const expected = confirmOf("sync", "确认同步");
     const ok =
-      $("sync-yes").checked &&
-      $("sync-confirm").value.trim() === (state.meta && state.meta.confirm_text) &&
+      $("sync-yes") && $("sync-yes").checked &&
+      $("sync-confirm").value.trim() === expected &&
       $("sync-token").value.trim() &&
       $("sync-source").value &&
       $("sync-target").value &&
-      $("sync-source").value !== $("sync-target").value;
+      $("sync-source").value !== $("sync-target").value &&
+      (state.accounts || []).length >= 2;
     $("sync-run").disabled = !ok;
     updateSyncPreview();
+    paintAccountRoles();
+  }
+
+  async function postWrite(path, token, body) {
+    const res = await fetch(path + qed(), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + token,
+      },
+      body: JSON.stringify(Object.assign({ edition: state.edition }, body)),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { res: res, data: data };
+  }
+
+  function showResult(id, ok, html) {
+    const el = $(id);
+    if (!el) return;
+    el.hidden = false;
+    el.className = "wb-result" + (ok ? "" : " is-bad");
+    el.innerHTML = html;
+  }
+
+  function shareToken(fromId) {
+    const v = ($(fromId) && $(fromId).value) || "";
+    ["sync-token", "rb-token", "sx-token", "pj-token", "tk-token"].forEach((id) => {
+      if ($(id) && id !== fromId && !$(id).value) $(id).value = v;
+    });
   }
 
   async function doSync() {
@@ -473,30 +605,389 @@
     log.textContent = "正在提交…";
     const token = $("sync-token").value.trim();
     try {
-      const res = await fetch("/api/sync" + qed(), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + token,
-        },
-        body: JSON.stringify({
-          source_uid: $("sync-source").value,
-          target_uid: $("sync-target").value,
-          confirm: true,
-          confirm_text: $("sync-confirm").value.trim(),
-          edition: state.edition,
-        }),
+      const { res, data } = await postWrite("/api/sync", token, {
+        source_uid: $("sync-source").value,
+        target_uid: $("sync-target").value,
+        confirm: true,
+        confirm_text: $("sync-confirm").value.trim(),
+        keep_cloud_mapping: $("sync-keep-mapping") && $("sync-keep-mapping").checked,
+        restart: $("sync-restart") && $("sync-restart").checked,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        log.textContent = (data.message || data.error || "同步失败") + (data.log ? "\n" + data.log : "");
+      const ok = res.ok && data.ok;
+      const tag = data.backup_tag ? "备份标签：<strong>" + escapeHtml(data.backup_tag) + "</strong>，可在「备份与回滚」里还原。" : "";
+      showResult(
+        "sync-result",
+        ok,
+        escapeHtml(data.message || (ok ? "完成" : data.error || "同步失败")) + (tag ? "<br>" + tag : "") +
+        (data.restart_message ? "<br>" + escapeHtml(data.restart_message) : "")
+      );
+      log.textContent = (data.message || (ok ? "完成" : "失败")) + (data.log ? "\n" + data.log : "");
+      if (ok) {
+        state.syncPreview = null;
+        await reload();
+        loadBackups();
+      }
+    } catch (e) {
+      showResult("sync-result", false, "请求失败：" + escapeHtml(e.message));
+      log.textContent = "请求失败：" + e.message;
+    }
+  }
+
+  /* ----- 工作台其它页签 ----- */
+  function switchWbTab(name) {
+    document.querySelectorAll(".wb-tab").forEach((b) => {
+      const on = b.getAttribute("data-tab") === name;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".wb-panel").forEach((p) => {
+      const on = p.getAttribute("data-tab") === name;
+      p.classList.toggle("is-on", on);
+      p.hidden = !on;
+    });
+    if (name === "backups") loadBackups();
+    if (name === "session") loadCrossSessions();
+    if (name === "project") loadProjects();
+    if (name === "tasks") loadTasks();
+    if (name === "diagnose") loadDiagnose();
+  }
+
+  async function loadBackups() {
+    const el = $("backup-list");
+    if (!el) return;
+    try {
+      const data = await get("/api/backups" + qed());
+      const rows = data.backups || [];
+      if (!rows.length) {
+        el.innerHTML = '<p class="empty-desc">还没有备份。做完一次同步、跨版本迁移或项目导入后，标签会出现在这里。</p>';
         return;
       }
-      log.textContent = (data.message || "完成") + (data.log ? "\n" + data.log : "");
-      await reload();
+      el.innerHTML = rows.map((b) => {
+        const contents = (b.contents || []).join(" + ") || "—";
+        const kind = b.kind === "session" ? "跨版本对话" : b.kind === "project" ? "跨设备项目" : b.kind === "broken" ? "损坏" : "整账号";
+        return (
+          '<div class="wb-bk">' +
+          '<span class="tag">' + escapeHtml(b.tag) + "</span>" +
+          '<span class="desc">' + escapeHtml((b.label || kind) + " · " + contents + (b.created_at ? " · " + b.created_at : "")) + "</span>" +
+          (b.ok
+            ? '<button type="button" data-tag="' + escapeHtml(b.tag) + '" data-kind="' + escapeHtml(b.kind || "") + '">选此回滚</button>'
+            : '<span class="desc">' + escapeHtml(b.error || "无法回滚") + "</span>") +
+          "</div>"
+        );
+      }).join("");
+      el.querySelectorAll("button[data-tag]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          $("rb-tag").value = btn.getAttribute("data-tag") || "";
+          $("rb-tag").dataset.kind = btn.getAttribute("data-kind") || "";
+          rbReady();
+        });
+      });
     } catch (e) {
-      log.textContent = "请求失败：" + e.message;
+      el.textContent = "读取备份失败：" + e.message;
+    }
+  }
+
+  function rbReady() {
+    const expected = confirmOf("rollback", "确认回滚");
+    $("rb-run").disabled = !(
+      $("rb-yes").checked &&
+      $("rb-confirm").value.trim() === expected &&
+      $("rb-token").value.trim() &&
+      $("rb-tag").value.trim()
+    );
+  }
+
+  async function doRollback() {
+    if ($("rb-run").disabled) return;
+    const { res, data } = await postWrite("/api/rollback", $("rb-token").value.trim(), {
+      tag: $("rb-tag").value.trim(),
+      kind: $("rb-tag").dataset.kind || "",
+      confirm: true,
+      confirm_text: $("rb-confirm").value.trim(),
+    });
+    const ok = res.ok && data.ok;
+    showResult("rb-result", ok, escapeHtml(data.message || data.error || (ok ? "已回滚" : "回滚失败")) +
+      (data.log ? "<pre>" + escapeHtml(data.log) + "</pre>" : ""));
+    if (ok) { await reload(); loadBackups(); }
+  }
+
+  async function loadCrossSessions() {
+    const el = $("sx-list");
+    const src = $("sx-from").value;
+    const q = ($("sx-query") && $("sx-query").value.trim()) || "";
+    try {
+      const data = await get("/api/session-migrate/list?from=" + encodeURIComponent(src) + (q ? "&query=" + encodeURIComponent(q) : ""));
+      const rows = data.sessions || [];
+      if (!data.edition_exists) {
+        el.innerHTML = "<p class=\"empty-desc\">这个版本的数据目录不存在。</p>";
+        return;
+      }
+      if (!rows.length) {
+        el.innerHTML = "<p class=\"empty-desc\">没有符合条件的对话。</p>";
+        return;
+      }
+      el.innerHTML = rows.map((s) =>
+        '<label class="wb-sess"><input type="radio" name="sx-sid" value="' + escapeHtml(s.id) + '"> <strong>' +
+        escapeHtml(s.title || "(无标题)") + "</strong> · " + escapeHtml(s.user_display || "") +
+        (s.cwd ? " · " + escapeHtml(s.cwd) : "") + "</label>"
+      ).join("");
+    } catch (e) {
+      el.textContent = "列出对话失败：" + e.message;
+    }
+  }
+
+  function sxSelected() {
+    const r = document.querySelector('input[name="sx-sid"]:checked');
+    return r ? r.value : "";
+  }
+
+  function sxReady() {
+    const expected = confirmOf("session", "确认迁移");
+    $("sx-run").disabled = !(
+      $("sx-yes").checked &&
+      $("sx-confirm").value.trim() === expected &&
+      $("sx-token").value.trim() &&
+      sxSelected() &&
+      $("sx-from").value !== $("sx-to").value
+    );
+  }
+
+  async function doSession(dry) {
+    const sid = sxSelected();
+    if (!sid) {
+      $("sx-preview-out").textContent = "请先在列表里选一条对话。";
+      return;
+    }
+    if (!dry && $("sx-run").disabled) return;
+    const body = {
+      from: $("sx-from").value,
+      to: $("sx-to").value,
+      session_id: sid,
+      mode: $("sx-mode").value,
+      on_conflict: $("sx-conflict").value,
+      dry_run: !!dry,
+    };
+    if (!dry) {
+      body.confirm = true;
+      body.confirm_text = $("sx-confirm").value.trim();
+    }
+    const token = $("sx-token").value.trim() || $("sync-token").value.trim();
+    const { res, data } = await postWrite("/api/session-migrate", token, body);
+    const ok = res.ok && data.ok;
+    const text = (data.message || data.error || "") + (data.backup_tag ? " 备份标签：" + data.backup_tag : "") + (data.log ? "\n" + data.log : "");
+    if (dry) {
+      $("sx-preview-out").className = "sync-preview";
+      $("sx-preview-out").textContent = text || "预览完成（未写盘）。";
+    } else {
+      showResult("sx-result", ok, escapeHtml(data.message || data.error || (ok ? "完成" : "失败")) +
+        (data.backup_tag ? "<br>备份标签：<strong>" + escapeHtml(data.backup_tag) + "</strong>" : "") +
+        (data.log ? "<pre>" + escapeHtml(data.log) + "</pre>" : ""));
+      if (ok) { loadCrossSessions(); loadBackups(); }
+    }
+  }
+
+  async function loadProjects() {
+    const el = $("pj-list");
+    try {
+      const data = await get("/api/projects" + qed());
+      const rows = data.projects || [];
+      if (!rows.length) {
+        el.innerHTML = "<p class=\"empty-desc\">这个版本里没有带工作目录的会话，无可导出项目。</p>";
+        return;
+      }
+      el.innerHTML = rows.map((p) =>
+        '<div class="wb-proj"><button type="button" class="btn-ghost" data-cwd="' + escapeHtml(p.cwd) + '">选为导出</button> ' +
+        escapeHtml(p.cwd) + " · " + escapeHtml(String(p.session_count)) + " 个会话</div>"
+      ).join("");
+      el.querySelectorAll("button[data-cwd]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          $("pj-cwd").value = btn.getAttribute("data-cwd") || "";
+          const name = ($("pj-cwd").value.split("/").pop() || "project") + "-workbuddy.wbproj";
+          if (!$("pj-out").value) $("pj-out").value = name;
+          pjExReady();
+        });
+      });
+    } catch (e) {
+      el.textContent = "列出项目失败：" + e.message;
+    }
+  }
+
+  function pjExReady() {
+    const expected = confirmOf("export", "确认导出");
+    $("pj-export").disabled = !(
+      $("pj-ex-yes").checked &&
+      $("pj-ex-confirm").value.trim() === expected &&
+      $("pj-token").value.trim() &&
+      $("pj-cwd").value.trim() &&
+      $("pj-out").value.trim()
+    );
+  }
+  function pjImReady() {
+    const expected = confirmOf("import", "确认导入");
+    $("pj-import").disabled = !(
+      $("pj-im-yes").checked &&
+      $("pj-im-confirm").value.trim() === expected &&
+      $("pj-token").value.trim() &&
+      $("pj-pkg").value.trim() &&
+      $("pj-in-cwd").value.trim()
+    );
+  }
+
+  async function doProjectExport() {
+    if ($("pj-export").disabled) return;
+    const { res, data } = await postWrite("/api/projects/export", $("pj-token").value.trim(), {
+      cwd: $("pj-cwd").value.trim(),
+      out: $("pj-out").value.trim(),
+      confirm: true,
+      confirm_text: $("pj-ex-confirm").value.trim(),
+    });
+    const ok = res.ok && data.ok;
+    showResult("pj-result", ok, escapeHtml(data.message || data.error || (ok ? "已导出" : "导出失败")) +
+      (data.out ? "<br>本机路径：" + escapeHtml(data.out) : "") +
+      (data.log ? "<pre>" + escapeHtml(data.log) + "</pre>" : ""));
+    if (ok && data.out) $("pj-pkg").value = data.out;
+  }
+
+  async function doProjectInfo() {
+    const pkg = $("pj-pkg").value.trim();
+    if (!pkg) { $("pj-preview").textContent = "请填写本机迁移包路径。"; return; }
+    try {
+      const data = await get("/api/projects/info?package=" + encodeURIComponent(pkg));
+      const info = data.info || {};
+      $("pj-preview").className = "sync-preview";
+      $("pj-preview").innerHTML =
+        "<strong>" + escapeHtml(info.name || pkg) + "</strong> · 会话 " + escapeHtml(String(info.session_count || 0)) +
+        (info.source_cwd ? " · 源路径 " + escapeHtml(info.source_cwd) : "") +
+        (info.source_display ? " · 源账号 " + escapeHtml(info.source_display) : "") +
+        (info.include_workspace ? " · 含工作区记忆" : "") +
+        ((info.sessions || []).length
+          ? "<ul>" + info.sessions.slice(0, 15).map((s) => "<li>" + escapeHtml(s.title || "") + "</li>").join("") + "</ul>"
+          : "");
+    } catch (e) {
+      $("pj-preview").textContent = e.message;
+    }
+  }
+
+  async function doProjectImport(dry) {
+    if (!dry && $("pj-import").disabled) return;
+    const { res, data } = await postWrite("/api/projects/import", $("pj-token").value.trim(), {
+      package: $("pj-pkg").value.trim(),
+      cwd: $("pj-in-cwd").value.trim(),
+      on_conflict: $("pj-conflict").value,
+      dry_run: !!dry,
+      confirm: !dry,
+      confirm_text: dry ? "" : $("pj-im-confirm").value.trim(),
+    });
+    const ok = res.ok && data.ok;
+    const text = (data.message || data.error || "") + (data.backup_tag ? " 备份标签：" + data.backup_tag : "") + (data.log ? "\n" + data.log : "");
+    if (dry) {
+      $("pj-preview").className = "sync-preview";
+      $("pj-preview").textContent = text || "预览完成（未写盘）。";
+    } else {
+      showResult("pj-result", ok, escapeHtml(data.message || data.error || (ok ? "完成" : "失败")) +
+        (data.backup_tag ? "<br>备份标签：<strong>" + escapeHtml(data.backup_tag) + "</strong>" : "") +
+        (data.log ? "<pre>" + escapeHtml(data.log) + "</pre>" : ""));
+      if (ok) loadBackups();
+    }
+  }
+
+  async function loadTasks() {
+    const el = $("task-list");
+    try {
+      const data = await get("/api/tasks" + qed());
+      if (data.note) $("tasks-note").textContent = data.note;
+      const rows = data.sessions || [];
+      if (!rows.length) {
+        el.innerHTML = "<p class=\"empty-desc\">没有发现历史任务数据。</p>";
+        return;
+      }
+      el.innerHTML =
+        "<p>共 " + escapeHtml(String(data.total_tasks)) + " 个任务，待办 " + escapeHtml(String(data.total_pending)) +
+        "，完成 " + escapeHtml(String(data.total_completed)) + "。</p>" +
+        rows.map((s) =>
+          '<div class="wb-task"><button type="button" class="btn-ghost" data-sid="' + escapeHtml(s.session_id) + '">选此恢复</button> ' +
+          "<strong>" + escapeHtml(s.title || s.session_display) + "</strong> · 待办 " +
+          escapeHtml(String(s.pending)) + " / 共 " + escapeHtml(String(s.task_count)) +
+          (s.pending_subjects && s.pending_subjects.length
+            ? "<div class=\"desc\">" + escapeHtml(s.pending_subjects.join("、")) + "</div>"
+            : "") + "</div>"
+        ).join("");
+      el.querySelectorAll("button[data-sid]").forEach((btn) => {
+        btn.addEventListener("click", () => { $("tk-session").value = btn.getAttribute("data-sid") || ""; tkReady(); });
+      });
+    } catch (e) {
+      el.textContent = "读取任务失败：" + e.message;
+    }
+  }
+
+  function tkReady() {
+    const expected = confirmOf("restore", "确认恢复");
+    $("tk-run").disabled = !(
+      $("tk-yes").checked &&
+      $("tk-confirm").value.trim() === expected &&
+      $("tk-token").value.trim()
+    );
+  }
+
+  async function doRestoreTasks() {
+    if ($("tk-run").disabled) return;
+    const { res, data } = await postWrite("/api/tasks/restore", $("tk-token").value.trim(), {
+      session_id: $("tk-session").value.trim(),
+      confirm: true,
+      confirm_text: $("tk-confirm").value.trim(),
+    });
+    const ok = res.ok && data.ok;
+    showResult("tk-result", ok, escapeHtml(data.message || data.error || (ok ? "已恢复" : "恢复失败")) +
+      (data.log ? "<pre>" + escapeHtml(data.log) + "</pre>" : ""));
+    if (ok) loadTasks();
+  }
+
+  async function loadDiagnose() {
+    const el = $("diag-view");
+    try {
+      const data = await get("/api/diagnose" + qed());
+      const login = data.login || {};
+      const acc = data.accounts || [];
+      let html = "<h3>登录态来源</h3><ul>";
+      html += "<li>客户端登录态（account-snapshot）：" + escapeHtml(login.client_display || "—") +
+        (login.client_nickname ? " 「" + escapeHtml(login.client_nickname) + "」" : "") + "</li>";
+      html += "<li>扩展侧（storage.json）：" + escapeHtml(login.storage_display || "—") + "</li>";
+      html += "<li>面板最近 uid：" + escapeHtml(login.panel_display || "—") + "</li>";
+      html += "<li>本次判定当前登录：" + escapeHtml(login.current_display || "—") + "</li></ul>";
+      if (login.conflict) html += '<div class="wb-warn">' + escapeHtml(login.conflict_message) + "</div>";
+      html += "<h3>本版本账号</h3>";
+      if (!acc.length) html += "<p>没有读到账号。</p>";
+      else {
+        html += '<table class="wb-diag-table"><thead><tr><th>账号</th><th>会话</th><th>记忆</th><th>MCP</th><th>当前</th></tr></thead><tbody>';
+        acc.forEach((a) => {
+          html += "<tr><td>" + escapeHtml((a.nickname ? a.nickname + " · " : "") + a.display_id) +
+            '</td><td class="num">' + escapeHtml(String(a.session_count)) +
+            '</td><td class="num">' + escapeHtml(a.memory_display || "—") +
+            '</td><td class="num">' + escapeHtml(String(a.mcp_servers) + " mcp / " + String(a.connector_states) + " conn") +
+            "</td><td>" + (a.is_current ? "是" : "") + "</td></tr>";
+        });
+        html += "</tbody></table>";
+      }
+      if ((data.suggestions || []).length) {
+        html += "<h3>迁移建议（按数据量）</h3><ul>";
+        data.suggestions.forEach((s) => {
+          html += "<li>" + escapeHtml(s.source_display) + " → " + escapeHtml(s.target_display) +
+            "（" + escapeHtml(String(s.session_count)) + " 会话，" + escapeHtml(s.memory_display) + " 记忆）</li>";
+        });
+        html += "</ul>";
+      }
+      if (data.single_account) html += "<p>" + escapeHtml(data.message || "只发现一个账号。") + "</p>";
+      if ((data.other_editions || []).length) {
+        html += "<h3>另一版本（本次未诊断）</h3><ul>";
+        data.other_editions.forEach((e) => {
+          html += "<li>" + escapeHtml(e.label) + " " + escapeHtml(e.path_name || "") + " · " + escapeHtml(e.stat || "") +
+            " —— 请用顶栏切换版本再看一次。</li>";
+        });
+        html += "</ul>";
+      }
+      el.innerHTML = html;
+    } catch (e) {
+      el.textContent = "诊断失败：" + e.message;
     }
   }
 
@@ -1808,6 +2299,41 @@
   });
   $("sync-run").addEventListener("click", doSync);
   $("sync-refresh").addEventListener("click", fillPreflight);
+  document.getElementById("wb-tabs") && document.querySelectorAll(".wb-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchWbTab(btn.getAttribute("data-tab")));
+  });
+  ["rb-yes", "rb-confirm", "rb-token", "rb-tag"].forEach((id) => {
+    if ($(id)) { $(id).addEventListener("input", rbReady); $(id).addEventListener("change", rbReady); }
+  });
+  if ($("rb-run")) $("rb-run").addEventListener("click", doRollback);
+  if ($("rb-refresh")) $("rb-refresh").addEventListener("click", loadBackups);
+  ["sx-yes", "sx-confirm", "sx-token"].forEach((id) => {
+    if ($(id)) { $(id).addEventListener("input", sxReady); $(id).addEventListener("change", sxReady); }
+  });
+  if ($("sx-from")) $("sx-from").addEventListener("change", () => { loadCrossSessions(); sxReady(); });
+  if ($("sx-to")) $("sx-to").addEventListener("change", sxReady);
+  if ($("sx-query")) $("sx-query").addEventListener("input", () => { clearTimeout(state._sxQ); state._sxQ = setTimeout(loadCrossSessions, 250); });
+  if ($("sx-preview")) $("sx-preview").addEventListener("click", () => doSession(true));
+  if ($("sx-run")) $("sx-run").addEventListener("click", () => doSession(false));
+  if ($("sx-list")) $("sx-list").addEventListener("change", sxReady);
+  ["pj-ex-yes", "pj-ex-confirm", "pj-token", "pj-cwd", "pj-out"].forEach((id) => {
+    if ($(id)) { $(id).addEventListener("input", pjExReady); $(id).addEventListener("change", pjExReady); }
+  });
+  ["pj-im-yes", "pj-im-confirm", "pj-pkg", "pj-in-cwd"].forEach((id) => {
+    if ($(id)) { $(id).addEventListener("input", pjImReady); $(id).addEventListener("change", pjImReady); }
+  });
+  if ($("pj-export")) $("pj-export").addEventListener("click", doProjectExport);
+  if ($("pj-info")) $("pj-info").addEventListener("click", doProjectInfo);
+  if ($("pj-dry")) $("pj-dry").addEventListener("click", () => doProjectImport(true));
+  if ($("pj-import")) $("pj-import").addEventListener("click", () => doProjectImport(false));
+  ["tk-yes", "tk-confirm", "tk-token"].forEach((id) => {
+    if ($(id)) { $(id).addEventListener("input", tkReady); $(id).addEventListener("change", tkReady); }
+  });
+  if ($("tk-run")) $("tk-run").addEventListener("click", doRestoreTasks);
+  if ($("tk-refresh")) $("tk-refresh").addEventListener("click", loadTasks);
+  ["sync-token", "rb-token", "sx-token", "pj-token", "tk-token"].forEach((id) => {
+    if ($(id)) $(id).addEventListener("change", () => shareToken(id));
+  });
 
   function bindPills(id, field, after) {
     const box = $(id);

@@ -37,7 +37,7 @@
       <nav class="nav" aria-label="主导航">
         <a href="#/accounts" data-page="accounts" class="nav-item is-active">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="8" r="4"/></svg>
-          账号同步
+          账号
         </a>
         <a href="#/tokens" data-page="tokens" class="nav-item">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V9m6 10V5m6 14v-8m6 8V7"/></svg>
@@ -58,15 +58,15 @@
           <span class="dot" id="client-dot" aria-hidden="true"></span>
           <span class="client-label" id="client-status">客户端：检测中…</span>
         </div>
-        <div class="ver" id="app-version">v1.8.1</div>
+        <div class="ver" id="app-version">v1.9.0</div>
       </div>
     </aside>
 
     <div class="workspace">
       <header class="toolbar" id="toolbar">
         <div class="toolbar-lead">
-          <h1 id="toolbar-title">账号同步</h1>
-          <p class="toolbar-lede" id="toolbar-lede">查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。</p>
+          <h1 id="toolbar-title">账号</h1>
+          <p class="toolbar-lede" id="toolbar-lede">本机工作台：合并账号、备份回滚、跨版本对话、跨设备项目、历史任务和诊断。</p>
         </div>
         <div class="toolbar-edition" id="toolbar-edition" hidden></div>
         <div class="toolbar-spacer"></div>
@@ -96,65 +96,206 @@
 
       <div class="workspace-body" id="main">
       <section class="page is-on" data-page="accounts" id="page-accounts">
-        <div class="accounts-layout">
+        <div class="accounts-layout wb-bench">
           <div class="accounts-list pane-card">
-            <div class="section-head tight">
+            <div class="pane-title">
               <h2>本机账号 <span class="count-pill" id="account-count">0</span></h2>
             </div>
             <div class="account-grid" id="account-grid">
-              <article class="account-card skel-card" aria-hidden="true">
-                <div class="skel skel-line w-40"></div>
-                <div class="skel skel-line w-24"></div>
-                <div class="skel skel-num"></div>
-              </article>
-              <article class="account-card skel-card" aria-hidden="true">
-                <div class="skel skel-line w-40"></div>
-                <div class="skel skel-line w-24"></div>
-                <div class="skel skel-num"></div>
-              </article>
+              <article class="account-card skel-card" aria-hidden="true"><div class="skel"></div></article>
+              <article class="account-card skel-card" aria-hidden="true"><div class="skel"></div></article>
             </div>
           </div>
-          <aside class="sync-panel pane-card" id="sync-panel" aria-label="同步账号">
-            <div class="pane-title">同步账号</div>
-            <div class="sync-steps">
-              <div class="sync-step" data-step="1">
-                <div class="sync-step-h"><span class="step-n">1</span> 选择源与目标</div>
-                <div class="sync-pair">
+          <aside class="sync-panel pane-card" id="sync-panel" aria-label="账号工作台">
+            <div class="wb-tabs" id="wb-tabs" role="tablist">
+              <button type="button" class="wb-tab is-on" data-tab="merge" role="tab" aria-selected="true">合并账号</button>
+              <button type="button" class="wb-tab" data-tab="backups" role="tab" aria-selected="false">备份与回滚</button>
+              <button type="button" class="wb-tab" data-tab="session" role="tab" aria-selected="false">跨版本对话</button>
+              <button type="button" class="wb-tab" data-tab="project" role="tab" aria-selected="false">跨设备项目</button>
+              <button type="button" class="wb-tab" data-tab="tasks" role="tab" aria-selected="false">历史任务</button>
+              <button type="button" class="wb-tab" data-tab="diagnose" role="tab" aria-selected="false">诊断</button>
+            </div>
+            <div class="wb-panels">
+
+              <div class="wb-panel is-on" id="tab-merge" data-tab="merge" role="tabpanel">
+                <div class="sync-pair wb-pair" id="sync-pair">
                   <label>源账号
                     <select id="sync-source"></select>
                   </label>
-                  <div class="sync-arrow" aria-hidden="true">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10h12m0 0-4-4m4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </div>
+                  <div class="sync-arrow" aria-hidden="true">→</div>
                   <label>目标账号
                     <select id="sync-target"></select>
                   </label>
                 </div>
-                <div id="sync-preview" class="sync-preview">选好两个不同的账号后，这里会预览将要合并的会话和调用数量。</div>
-              </div>
-              <div class="sync-step" data-step="2">
-                <div class="sync-step-h"><span class="step-n">2</span> 安全检查</div>
+                <div id="sync-login-warn" class="wb-warn" hidden></div>
+                <div id="sync-preview" class="sync-preview">选好两个不同的账号后，这里会预览将要合并的会话、记忆和连接器。</div>
                 <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
                 <p class="sync-backup-note">同步会先备份本机数据库，再把源账号的会话、记忆和连接器合并到目标账号。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
-              </div>
-              <div class="sync-step" data-step="3">
-                <div class="sync-step-h"><span class="step-n">3</span> 确认并执行</div>
-                <label>本机令牌（只用于写操作，不会显示在地址栏）
-                  <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
-                </label>
-                <label>请输入「确认同步」
-                  <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
-                </label>
-                <label class="check">
-                  <input type="checkbox" id="sync-yes">
-                  我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
-                </label>
-                <div class="actions">
-                  <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
-                  <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
+                <div class="wb-toggles">
+                  <label class="check"><input type="checkbox" id="sync-keep-mapping"> 保留云端通道映射（默认会清理，换设备才看得到新对话）</label>
+                  <label class="check" id="sync-restart-wrap" hidden><input type="checkbox" id="sync-restart"> 完成后自动重启客户端（仅 macOS）</label>
                 </div>
+                <div class="wb-confirm" id="sync-confirm-row">
+                  <label>本机令牌（只用于写操作，不会显示在地址栏）
+                    <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
+                    <span class="hint" id="sync-token-path"></span>
+                  </label>
+                  <label>请输入「确认同步」
+                    <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="sync-yes">
+                    我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
+                  </label>
+                  <div class="actions">
+                    <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
+                    <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
+                  </div>
+                </div>
+                <div id="sync-result" class="wb-result" hidden></div>
                 <pre id="sync-log" hidden></pre>
               </div>
+
+              <div class="wb-panel" id="tab-backups" data-tab="backups" role="tabpanel" hidden>
+                <div id="backup-list" class="wb-list">正在读取备份…</div>
+                <div class="wb-confirm">
+                  <label>备份标签
+                    <input type="text" id="rb-tag" autocomplete="off" placeholder="从上面选择或粘贴标签">
+                  </label>
+                  <label>请输入「确认回滚」
+                    <input type="text" id="rb-confirm" autocomplete="off" placeholder="确认回滚">
+                  </label>
+                  <label>本机令牌
+                    <input type="password" id="rb-token" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label class="check"><input type="checkbox" id="rb-yes"> 我已退出客户端，并清楚这会用备份覆盖当前数据。</label>
+                  <div class="actions">
+                    <button type="button" id="rb-run" class="btn-danger" disabled>回滚此备份</button>
+                    <button type="button" id="rb-refresh" class="btn-ghost">刷新列表</button>
+                  </div>
+                  <div id="rb-result" class="wb-result" hidden></div>
+                </div>
+              </div>
+
+              <div class="wb-panel" id="tab-session" data-tab="session" role="tabpanel" hidden>
+                <div class="sync-pair wb-pair">
+                  <label>源版本
+                    <select id="sx-from"><option value="domestic">国内版</option><option value="intl">国际版</option></select>
+                  </label>
+                  <div class="sync-arrow" aria-hidden="true">→</div>
+                  <label>目标版本
+                    <select id="sx-to"><option value="intl">国际版</option><option value="domestic">国内版</option></select>
+                  </label>
+                </div>
+                <div class="wb-row">
+                  <label>过滤
+                    <input type="search" id="sx-query" placeholder="标题、路径或 id">
+                  </label>
+                  <label>模式
+                    <select id="sx-mode"><option value="move">移动（源侧删除）</option><option value="copy">复制（保留源）</option></select>
+                  </label>
+                  <label>冲突
+                    <select id="sx-conflict"><option value="skip">跳过</option><option value="overwrite">覆盖</option><option value="newer">保留较新</option></select>
+                  </label>
+                </div>
+                <div id="sx-list" class="wb-list">选择版本后列出可迁移的对话。</div>
+                <div class="actions">
+                  <button type="button" id="sx-preview" class="btn-ghost">先预览（不写盘）</button>
+                </div>
+                <div id="sx-preview-out" class="sync-preview is-muted">预览结果会显示在这里。</div>
+                <div class="wb-confirm">
+                  <label>请输入「确认迁移」
+                    <input type="text" id="sx-confirm" autocomplete="off" placeholder="确认迁移">
+                  </label>
+                  <label>本机令牌
+                    <input type="password" id="sx-token" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label class="check"><input type="checkbox" id="sx-yes"> 我已退出两个版本的客户端，并清楚这会改本机数据（会先备份）。</label>
+                  <div class="actions">
+                    <button type="button" id="sx-run" class="btn-danger" disabled>执行迁移</button>
+                  </div>
+                  <div id="sx-result" class="wb-result" hidden></div>
+                </div>
+              </div>
+
+              <div class="wb-panel" id="tab-project" data-tab="project" role="tabpanel" hidden>
+                <p class="sync-backup-note">包只写在本机你指定的路径，不会上传。导入前请先退出客户端，并指定本机已有的项目目录。</p>
+                <div id="pj-list" class="wb-list">正在列出本机项目…</div>
+                <div class="wb-row">
+                  <label>导出项目路径（cwd）
+                    <input type="text" id="pj-cwd" placeholder="从列表点选，或填写本机路径">
+                  </label>
+                  <label>导出到（本机 .wbproj）
+                    <input type="text" id="pj-out" placeholder="例如 ~/Desktop/项目.wbproj">
+                  </label>
+                </div>
+                <div class="wb-confirm">
+                  <label>请输入「确认导出」
+                    <input type="text" id="pj-ex-confirm" autocomplete="off" placeholder="确认导出">
+                  </label>
+                  <label>本机令牌
+                    <input type="password" id="pj-token" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label class="check"><input type="checkbox" id="pj-ex-yes"> 我确认把这个项目打包到上面的本机路径。</label>
+                  <div class="actions">
+                    <button type="button" id="pj-export" class="btn-primary" disabled>导出项目</button>
+                  </div>
+                </div>
+                <hr class="wb-hr">
+                <div class="wb-row">
+                  <label>导入包（本机 .wbproj 路径）
+                    <input type="text" id="pj-pkg" placeholder="/本机路径/项目.wbproj">
+                  </label>
+                  <label>导入到本机已有目录
+                    <input type="text" id="pj-in-cwd" placeholder="目录必须已存在">
+                  </label>
+                  <label>冲突
+                    <select id="pj-conflict"><option value="skip">跳过</option><option value="overwrite">覆盖</option></select>
+                  </label>
+                </div>
+                <div class="actions">
+                  <button type="button" id="pj-info" class="btn-ghost">查看包内容</button>
+                  <button type="button" id="pj-dry" class="btn-ghost">先预览导入（不写盘）</button>
+                </div>
+                <div id="pj-preview" class="sync-preview is-muted">查看或预览的结果会显示在这里。</div>
+                <div class="wb-confirm">
+                  <label>请输入「确认导入」
+                    <input type="text" id="pj-im-confirm" autocomplete="off" placeholder="确认导入">
+                  </label>
+                  <label class="check"><input type="checkbox" id="pj-im-yes"> 我已退出客户端，并清楚这会改本机数据库（会先备份）。</label>
+                  <div class="actions">
+                    <button type="button" id="pj-import" class="btn-danger" disabled>执行导入</button>
+                  </div>
+                  <div id="pj-result" class="wb-result" hidden></div>
+                </div>
+              </div>
+
+              <div class="wb-panel" id="tab-tasks" data-tab="tasks" role="tabpanel" hidden>
+                <p class="sync-backup-note" id="tasks-note">网页恢复任务会要求客户端先退出（比命令行更严），并需要令牌和「确认恢复」。</p>
+                <div id="task-list" class="wb-list">正在读取历史任务…</div>
+                <div class="wb-confirm">
+                  <label>从哪个会话恢复（可留空，表示所有待办）
+                    <input type="text" id="tk-session" placeholder="会话 id，可只写前缀">
+                  </label>
+                  <label>请输入「确认恢复」
+                    <input type="text" id="tk-confirm" autocomplete="off" placeholder="确认恢复">
+                  </label>
+                  <label>本机令牌
+                    <input type="password" id="tk-token" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label class="check"><input type="checkbox" id="tk-yes"> 我已退出客户端，并清楚这会把历史任务写到当前对话。</label>
+                  <div class="actions">
+                    <button type="button" id="tk-run" class="btn-danger" disabled>恢复任务</button>
+                    <button type="button" id="tk-refresh" class="btn-ghost">刷新</button>
+                  </div>
+                  <div id="tk-result" class="wb-result" hidden></div>
+                </div>
+              </div>
+
+              <div class="wb-panel" id="tab-diagnose" data-tab="diagnose" role="tabpanel" hidden>
+                <div id="diag-view">正在诊断…</div>
+              </div>
+
             </div>
           </aside>
         </div>

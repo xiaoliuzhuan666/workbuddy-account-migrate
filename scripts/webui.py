@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """WorkBuddy 本机网页服务。
 
-只绑定 127.0.0.1，校验 Host，写操作（账号同步）必须带本机令牌并二次确认。
-默认只读浏览，不改登录态。不要把服务绑到局域网或公网。
+只绑定 127.0.0.1，校验 Host，写操作（同步 / 回滚 / 跨版本对话 / 跨设备项目 / 任务恢复）
+必须带本机令牌并二次确认。默认只读浏览，不改登录态。不要把服务绑到局域网或公网。
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ from workbuddy_core.migrate_bridge import (  # noqa: E402
     ClientsStillRunning,
     SyncRefused,
     preflight,
-    run_sync,
 )
+from workbuddy_core import workbench  # noqa: E402
 from workbuddy_core.paths import resolve_workbuddy  # noqa: E402
 from workbuddy_core.rates import default_rates_path, load_rates  # noqa: E402
 from workbuddy_core.security import (  # noqa: E402
@@ -55,6 +55,7 @@ from workbuddy_core.volc_afp import coef_for_model  # noqa: E402
 from workbuddy_core.rates import NOT_FOUND  # noqa: E402
 
 CONFIRM_TEXT = "确认同步"
+# 各写操作的确认文案见 workbench.confirm_texts()
 DEFAULT_PORT = 18765
 STATIC_DIR = ROOT / "webui"
 
@@ -315,6 +316,21 @@ class Handler(BaseHTTPRequestHandler):
                 data = list_accounts(resolved)
                 data["ok"] = True
                 data["edition"] = resolved.as_dict()
+                # 用诊断函数补上记忆 / MCP / 登录态，保持原有字段兼容
+                try:
+                    diag = workbench.diagnose(STATE.home, resolved.path)
+                    by_id = {a["user_id"]: a for a in (diag.get("accounts") or [])}
+                    for a in data.get("accounts") or []:
+                        extra = by_id.get(a.get("user_id")) or {}
+                        for k in ("memory_bytes", "memory_display", "mcp_servers", "connector_states"):
+                            if k in extra:
+                                a[k] = extra[k]
+                    data["login"] = diag.get("login") or {}
+                    data["single_account"] = diag.get("single_account")
+                    data["suggestions"] = diag.get("suggestions") or []
+                    data["other_editions"] = diag.get("other_editions") or []
+                except Exception:
+                    data.setdefault("login", {})
                 return self._send_json(200, data)
             if path == "/api/sessions":
                 return self._send_json(200, self._sessions(q))
@@ -337,6 +353,48 @@ class Handler(BaseHTTPRequestHandler):
                 pf = preflight(STATE.home, resolved.path)
                 pf["edition"] = resolved.as_dict()
                 return self._send_json(200, pf)
+            if path == "/api/diagnose":
+                resolved = STATE.resolved(q.get("edition"))
+                data = workbench.diagnose(STATE.home, resolved.path)
+                data["edition"] = resolved.as_dict()
+                return self._send_json(200, data)
+            if path == "/api/backups":
+                resolved = STATE.resolved(q.get("edition"))
+                data = workbench.list_backups(STATE.home, resolved.path)
+                data["edition"] = resolved.as_dict()
+                return self._send_json(200, data)
+            if path == "/api/sync/preview":
+                resolved = STATE.resolved(q.get("edition"))
+                data = workbench.preview_sync(
+                    STATE.home, resolved.path,
+                    source_uid=str(q.get("source_uid") or ""),
+                    target_uid=str(q.get("target_uid") or ""),
+                )
+                data["edition"] = resolved.as_dict()
+                return self._send_json(200, data)
+            if path == "/api/tasks":
+                resolved = STATE.resolved(q.get("edition"))
+                data = workbench.list_tasks(STATE.home, resolved.path)
+                data["edition"] = resolved.as_dict()
+                return self._send_json(200, data)
+            if path == "/api/session-migrate/list":
+                data = workbench.list_cross_sessions(
+                    STATE.home,
+                    src=str(q.get("from") or q.get("src") or "domestic"),
+                    query=str(q.get("query") or ""),
+                )
+                return self._send_json(200, data)
+            if path == "/api/projects":
+                resolved = STATE.resolved(q.get("edition"))
+                data = workbench.list_projects(
+                    STATE.home, resolved.path,
+                    edition=resolved.edition if hasattr(resolved, "edition") else (q.get("edition") or "domestic"),
+                )
+                data["edition"] = resolved.as_dict()
+                return self._send_json(200, data)
+            if path == "/api/projects/info":
+                data = workbench.project_info(STATE.home, str(q.get("package") or ""))
+                return self._send_json(200, data)
             if path in ("/", "/index.html"):
                 return self._send_static("index.html")
             if path.startswith("/static/"):
@@ -347,6 +405,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_static(name)
             self._send_json(404, {"ok": False, "error": "not_found"})
         except Exception as e:
+            # 预览参数不对是 400，不是内部错误
+            from workbuddy_core.migrate_bridge import SyncRefused as _SR
+            if isinstance(e, _SR):
+                return self._send_json(400, {"ok": False, "error": "refused", "message": str(e)})
             self._handle_err(e)
 
     def do_POST(self):
@@ -360,31 +422,28 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "not_implemented",
                 "message": "从本地 catalog.json 刷新价格留给练手实现。测试见 tests/run_webui_tests.py。失败时不得覆盖旧表。",
             })
-        if path != "/api/sync":
-            self._send_json(404, {"ok": False, "error": "not_found"})
-            return
         body, err = self._read_json_body()
         if err:
             self._send_json(400, {"ok": False, "error": "bad_request", "message": err})
             return
-        resolved = STATE.resolved(body.get("edition") or q.get("edition"))
+        # 即使请求体里带了这些字段，也绝不往脚本里传
+        if body:
+            body.pop("force", None)
+            body.pop("assume_clients_closed", None)
+            body.pop("assume_closed", None)
+        resolved = STATE.resolved((body or {}).get("edition") or q.get("edition"))
         try:
-            result = run_sync(
-                home=STATE.home,
-                wb_dir=resolved.path,
-                source_uid=str(body.get("source_uid") or ""),
-                target_uid=str(body.get("target_uid") or ""),
-                confirm=bool(body.get("confirm")),
-                confirm_text=str(body.get("confirm_text") or ""),
-                expected_confirm=CONFIRM_TEXT,
-            )
+            result = self._dispatch_write(path, body or {}, resolved, q)
+            if result is None:
+                self._send_json(404, {"ok": False, "error": "not_found"})
+                return
             code = 200 if result.get("ok") else 400
             return self._send_json(code, result)
         except ClientsStillRunning as e:
             self._send_json(409, {
                 "ok": False,
                 "error": "clients_running",
-                "message": "WorkBuddy 客户端还在运行，必须先退出再同步（和命令行工具同一条规则）。网页不会在客户端开着时继续。",
+                "message": "WorkBuddy 客户端还在运行，必须先退出再执行写操作（和命令行工具同一条规则）。网页不会在客户端开着时继续，也不会使用 --force。",
                 "clients": e.clients,
             })
         except SyncRefused as e:
@@ -403,6 +462,89 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(405, {"ok": False, "error": "method_not_allowed"})
 
+    def _dispatch_write(self, path, body, resolved, q):
+        home = STATE.home
+        wb = resolved.path
+        confirm = bool(body.get("confirm"))
+        confirm_text = str(body.get("confirm_text") or "")
+        if path == "/api/sync":
+            return workbench.run_sync(
+                home=home, wb_dir=wb,
+                source_uid=str(body.get("source_uid") or ""),
+                target_uid=str(body.get("target_uid") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+                keep_cloud_mapping=bool(body.get("keep_cloud_mapping")),
+                restart=bool(body.get("restart")),
+                expected_confirm=CONFIRM_TEXT,
+            )
+        if path == "/api/rollback":
+            return workbench.run_rollback(
+                home=home, wb_dir=wb,
+                tag=str(body.get("tag") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+                kind=str(body.get("kind") or ""),
+            )
+        if path == "/api/session-migrate":
+            return workbench.run_session_migrate(
+                home=home, wb_dir=wb,
+                src=str(body.get("from") or body.get("src") or ""),
+                dst=str(body.get("to") or body.get("dst") or ""),
+                session_id=str(body.get("session_id") or ""),
+                mode=str(body.get("mode") or "move"),
+                on_conflict=str(body.get("on_conflict") or "skip"),
+                dry_run=bool(body.get("dry_run")),
+                target_uid=str(body.get("target_uid") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+            )
+        if path == "/api/session-migrate/rollback":
+            return workbench.run_session_rollback(
+                home=home, wb_dir=wb,
+                tag=str(body.get("tag") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+            )
+        if path == "/api/projects/export":
+            return workbench.run_project_export(
+                home=home, wb_dir=wb,
+                cwd=str(body.get("cwd") or ""),
+                out=str(body.get("out") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+                no_workspace_memory=bool(body.get("no_workspace_memory")),
+                edition=str(body.get("edition") or q.get("edition") or "domestic"),
+            )
+        if path == "/api/projects/import":
+            return workbench.run_project_import(
+                home=home, wb_dir=wb,
+                package=str(body.get("package") or ""),
+                cwd=str(body.get("cwd") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+                dry_run=bool(body.get("dry_run")),
+                on_conflict=str(body.get("on_conflict") or "skip"),
+                target_uid=str(body.get("target_uid") or ""),
+                edition=str(body.get("edition") or q.get("edition") or "domestic"),
+            )
+        if path == "/api/projects/rollback":
+            return workbench.run_project_rollback(
+                home=home, wb_dir=wb,
+                tag=str(body.get("tag") or ""),
+                confirm=confirm,
+                confirm_text=confirm_text,
+                edition=str(body.get("edition") or q.get("edition") or "domestic"),
+            )
+        if path == "/api/tasks/restore":
+            return workbench.run_restore_tasks(
+                home=home, wb_dir=wb,
+                session_id=str(body.get("session_id") or "") or None,
+                confirm=confirm,
+                confirm_text=confirm_text,
+            )
+        return None
+
     def _handle_err(self, e: Exception):
         # 不把堆栈和路径里可能出现的敏感信息原样丢给浏览器；终端打脱敏后的类型
         sys.stderr.write("webui error: %s\n" % redact(type(e).__name__ + ": " + str(e)))
@@ -419,7 +561,10 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "bind": STATE.bind,
             "port": STATE.port,
-            "app_version": "1.8.1",
+            "app_version": "1.9.0",
+            "confirm_texts": workbench.confirm_texts(),
+            "platform": __import__("platform").system(),
+            "restart_supported": __import__("platform").system() == "Darwin",
             "token_required_for_writes": True,
             "token_path": str(STATE.token_path) if STATE.token_path else "",
             "confirm_text": CONFIRM_TEXT,

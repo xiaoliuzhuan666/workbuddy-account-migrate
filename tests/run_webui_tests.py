@@ -918,12 +918,12 @@ def test_desktop_layout():
     check("工作区铺满宽度", ".workspace" in css and "max-width: none" in css)
     check("1024 下明细为抽屉", "translateX(100%)" in css and "master-detail.is-open" in css)
     check("脚本按行选中而不是表内展开", "function renderSessionDetail" in js and "selectSession" in js)
-    check("版本是 1.8.1", "v1.8.1" in html)
+    check("版本是 1.9.0", "v1.9.0" in html)
     check("工作区铺满视口高度", "100dvh" in css and "flex: 1 1 auto" in css)
     check("细滚动条", "scrollbar-width: thin" in css and "::-webkit-scrollbar" in css)
     check("主从分栏拉伸到剩余高度", ".master-detail" in css and "min-height: 0" in css)
     check("无会话时自动选第一行", "userClosedDetail" in js and "!state.openSession && rows.length" in js)
-    check("账号页是列表加同步向导", 'id="sync-panel"' in html and 'id="sync-preview"' in html and 'id="sync-source"' in html)
+    check("账号页是工作台", 'id="sync-panel"' in html and 'id="sync-preview"' in html and 'id="sync-source"' in html and 'id="wb-tabs"' in html and "合并账号" in html and "备份与回滚" in html)
     check("同步安全控件都在", 'id="sync-token"' in html and 'id="sync-confirm"' in html and 'id="sync-yes"' in html and 'id="sync-run"' in html and 'id="sync-preflight"' in html)
     check("确认文案仍是确认同步", "确认同步" in html)
     check("预检是芯片不是整条红框", "chip-dot" in js and ".preflight.chip" in css)
@@ -932,6 +932,11 @@ def test_desktop_layout():
 def main():
     print("workbuddy 本机网页版测试")
     print("仓库：%s" % ROOT)
+    try:
+        from run_workbench_tests import run_all as _run_workbench
+    except ImportError:
+        from tests.run_workbench_tests import run_all as _run_workbench  # noqa
+
     for fn in (
         test_parse,
         test_usage_and_crosscheck,
@@ -955,6 +960,7 @@ def main():
             FAILED += 1
             FAILURES.append((fn.__name__, traceback.format_exc()))
             print("  [EXC] %s\n%s" % (fn.__name__, traceback.format_exc()))
+    _run_workbench()
     print()
     print("结果：通过 %d，失败 %d" % (PASSED, FAILED))
     for name, detail in FAILURES:
