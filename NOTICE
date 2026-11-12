@@ -1,0 +1,23 @@
+Third-Party Notices
+===================
+
+Portions of the local usage parser in src/workbuddy_core/usage.py are adapted
+from workbuddy-usage-status:
+
+    Copyright (c) 2026 Clancy
+    License: MIT
+    Source: https://github.com/clancy-feng/workbuddy-usage-status
+    (tag v1.6.5, commit 2ad519f)
+
+The following ideas and formulas are taken from that project and must keep
+the copyright notice above:
+
+  - Reading providerData.rawUsage (credit, prompt_tokens, prompt_cache_hit_tokens,
+    completion_tokens) and providerData.model from ~/.workbuddy/projects/*/*.jsonl
+  - Uncached input tokens = prompt_tokens - prompt_cache_hit_tokens (or 0 if
+    prompt_tokens is not greater)
+  - Using session_usage.credit_json in workbuddy.db as a ledger when per-call
+    detail is missing
+  - Grouping credit by the call's own timestamp, not by the session's first day
+
+The original MIT license text is in THIRD_PARTY/workbuddy-usage-status.LICENSE.

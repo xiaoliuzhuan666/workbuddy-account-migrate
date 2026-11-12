@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>WorkBuddy 本机看板</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <p class="eyebrow">只在本机 · 127.0.0.1</p>
+      <h1>WorkBuddy 本机看板</h1>
+    </div>
+    <div class="top-meta" id="top-meta">正在读取本机数据…</div>
+  </header>
+
+  <main>
+    <section class="panel" id="notice-panel" hidden></section>
+
+    <section class="stats" id="stats"></section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>国内模型用量与价格对比</h2>
+        <div class="controls">
+          <label>积分折算
+            <select id="conversion"></select>
+          </label>
+          <button type="button" class="ghost" id="reload">刷新</button>
+        </div>
+      </div>
+      <p class="footnote" id="rate-note"></p>
+      <div class="table-wrap">
+        <table id="model-table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th class="num">调用</th>
+              <th class="num">输入 token</th>
+              <th class="num">输出 token</th>
+              <th class="num">思考 token</th>
+              <th class="num">缓存命中率</th>
+              <th class="num">去缓存效率</th>
+              <th class="num">总 token / 积分</th>
+              <th class="num">实际积分</th>
+              <th class="num">估算费用</th>
+              <th>官方倍率</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="footnote" id="cross-check"></p>
+    </section>
+
+    <section class="panel" id="codebuddy-panel">
+      <h2>其他本机工具</h2>
+      <div id="codebuddy-body">正在探测 CodeBuddy CLI…</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>会话记录</h2>
+        <label class="grow">筛选
+          <input type="search" id="session-filter" placeholder="标题、模型或账号">
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table id="session-table">
+          <thead>
+            <tr>
+              <th>标题</th>
+              <th>模型</th>
+              <th class="num">调用</th>
+              <th class="num">积分</th>
+              <th class="num">输入 / 输出</th>
+              <th class="num">缓存命中率</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="footnote" id="session-page"></p>
+    </section>
+
+    <section class="panel warn-panel">
+      <h2>账号同步</h2>
+      <p>默认只读。同步会调用仓库里现有的 <code>migrate.py</code>，把源账号的会话、记忆和连接器合并到目标账号，并先做备份。和命令行一样：<strong>必须先退出 WorkBuddy 客户端</strong>。不会改登录态文件。同步前请看清源和目标，操作不可悄悄撤销（可用 CLI 的 <code>--rollback</code>）。</p>
+      <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
+      <div class="sync-grid">
+        <label>源账号
+          <select id="sync-source"></select>
+        </label>
+        <label>目标账号
+          <select id="sync-target"></select>
+        </label>
+        <label>本机令牌（只用于写操作，不会显示在地址栏）
+          <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
+        </label>
+        <label>请输入「确认同步」
+          <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="sync-yes">
+        我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
+      </label>
+      <div class="actions">
+        <button type="button" id="sync-run" class="danger" disabled>同步账号</button>
+        <button type="button" id="sync-refresh" class="ghost">重新检查客户端</button>
+      </div>
+      <pre id="sync-log" hidden></pre>
+    </section>
+  </main>
+
+  <footer>
+    数据只在这台电脑上读取，服务只监听 127.0.0.1。价格来自可编辑的 <code>config/model_rates.json</code>，没核实到的会写「没读到」。
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

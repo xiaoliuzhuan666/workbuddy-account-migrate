@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-12",
+  "timezone": "Asia/Singapore",
+  "notes": "本文件可自行编辑。只收录已对照过官方页面的数字；没核实到的项写「没读到」，估算时会跳过，不要把猜测值填进来当成官方价格。客户端实际扣费以 WorkBuddy 账单为准。",
+  "default_conversion": "topup_pack",
+  "credit_to_cny": [
+    {
+      "key": "topup_pack",
+      "label": "加量包（1000 积分 50 元）",
+      "credits": 1000,
+      "cny": 50,
+      "cny_per_credit": 0.05,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 加量包",
+      "retrieved_at": "2026-11-12",
+      "note": "按加量包 1,000 积分 50 元、有效期 1 个月折算，每积分 0.05 元。只作估算。订阅套餐里每积分更便宜，见同一页面。付费会员才能买加量包。",
+      "status": "ok"
+    },
+    {
+      "key": "standard_monthly_base",
+      "label": "标准版月付（99 元 / 基础 2000 积分）",
+      "credits": 2000,
+      "cny": 99,
+      "cny_per_credit": 0.0495,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 标准版月付与基础积分",
+      "retrieved_at": "2026-11-12",
+      "note": "只按基础 2,000 积分算，不含限时加赠。连续包月是 70 元，每积分会更低。",
+      "status": "ok"
+    },
+    {
+      "key": "standard_monthly_promo",
+      "label": "标准版月付限时实得（99 元 / 4000 积分）",
+      "credits": 4000,
+      "cny": 99,
+      "cny_per_credit": 0.02475,
+      "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+      "source_title": "WorkBuddy 定价详情 · 标准版每月实得积分（限时）",
+      "retrieved_at": "2026-11-12",
+      "note": "含限时加赠 2,000 积分。赠送部分自到账日起 1 个月内有效，活动结束后不再适用此折算。",
+      "status": "ok"
+    }
+  ],
+  "official_multipliers": {
+    "source": "https://www.workbuddy.cn/docs/workbuddymini/features/Select-Model",
+    "source_title": "WorkBuddy Mini「选择模型」页的积分消耗倍率",
+    "retrieved_at": "2026-11-12",
+    "unit": "界面倍率（xN），不是每百万 token 积分",
+    "note": "取自 2026-11-12 抓取的官方文档。该页没有公布每百万 token 的积分费率，倍率不能单独算出精确费用。模型显示名与 jsonl 里 providerData.model 可能不完全一致，对不上就标「没读到」。主产品（非 Mini）若有另一张表，本文件未收录。",
+    "models": {
+      "Auto": "没读到",
+      "Hy3": 0.0,
+      "GLM-5.2": 0.79,
+      "GLM-5.1": 0.79,
+      "GLM-5v-Turbo": 0.95,
+      "Kimi-K3": 1.62,
+      "Kimi-K2.7-Code": 0.57,
+      "Kimi-K2.6": 0.52,
+      "MiniMax-M3": 0.25,
+      "MiniMax-M2.7": "没读到",
+      "Deepseek-V4-Flash": 0.06,
+      "Deepseek-V4-Pro": 0.16
+    }
+  },
+  "per_million_token_credits": {
+    "source": "没读到",
+    "source_title": "",
+    "retrieved_at": "2026-11-12",
+    "unit": "积分 / 百万 token（未缓存输入、缓存命中、输出）",
+    "note": "官方文档未公布逐 token 费率。本表默认全部为「没读到」。若你根据本机 rawUsage 自己核对过，可以按模型填写 input / cached / output 三个数字，保存后刷新页面即可用来估算。不要把未核对的第三方文章数字直接当成官方费率。",
+    "models": {}
+  }
+}
