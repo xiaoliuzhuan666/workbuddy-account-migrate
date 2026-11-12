@@ -16,7 +16,7 @@
   </script>
   <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-page="accounts">
   <div class="app">
     <aside class="sidebar" aria-label="侧栏">
       <div class="brand">
@@ -54,309 +54,330 @@
       </nav>
 
       <div class="sidebar-foot">
-        <div class="theme-switch" role="group" aria-label="外观">
-          <button type="button" data-theme-set="light" id="theme-light">浅色</button>
-          <button type="button" data-theme-set="dark" id="theme-dark">深色</button>
-        </div>
         <div class="client-row">
           <span class="dot" id="client-dot" aria-hidden="true"></span>
           <span class="client-label" id="client-status">客户端：检测中…</span>
         </div>
-        <div class="ver" id="app-version">v1.7.1</div>
+        <div class="ver" id="app-version">v1.8.0</div>
       </div>
     </aside>
 
-    <main class="main" id="main">
-      <section class="banner" id="notice-panel" hidden></section>
-
-      <!-- 账号同步 -->
-      <section class="page is-on" data-page="accounts" id="page-accounts">
-        <header class="page-head">
-          <div>
-            <h1>账号同步</h1>
-            <p class="lede">查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。</p>
-          </div>
-        </header>
-
-        <div class="card sync-card">
-          <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
-          <details class="sync-more">
-            <summary>同步说明</summary>
-            <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
-          </details>
-          <div class="sync-grid">
-            <label>源账号
-              <select id="sync-source"></select>
-            </label>
-            <label>目标账号
-              <select id="sync-target"></select>
-            </label>
-            <label>本机令牌（只用于写操作，不会显示在地址栏）
-              <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
-            </label>
-            <label>请输入「确认同步」
-              <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
-            </label>
-          </div>
-          <label class="check">
-            <input type="checkbox" id="sync-yes">
-            我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
+    <div class="workspace">
+      <header class="toolbar" id="toolbar">
+        <div class="toolbar-lead">
+          <h1 id="toolbar-title">账号同步</h1>
+          <p class="toolbar-lede" id="toolbar-lede">查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。</p>
+        </div>
+        <div class="toolbar-edition" id="toolbar-edition" hidden></div>
+        <div class="toolbar-spacer"></div>
+        <div class="toolbar-actions">
+          <button type="button" class="btn-ghost toolbar-only" data-show="tokens" id="reload-tokens">刷新统计</button>
+          <label class="inline toolbar-only" data-show="credits">积分折算
+            <select id="conversion"></select>
           </label>
-          <div class="actions">
-            <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
-            <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
-          </div>
-          <pre id="sync-log" hidden></pre>
-        </div>
-
-        <div class="section-head">
-          <h2>账号 <span class="count-pill" id="account-count">0</span></h2>
-        </div>
-        <div class="account-grid" id="account-grid">
-          <article class="account-card skel-card" aria-hidden="true">
-            <div class="skel skel-line w-40"></div>
-            <div class="skel skel-line w-24"></div>
-            <div class="skel skel-num"></div>
-          </article>
-          <article class="account-card skel-card" aria-hidden="true">
-            <div class="skel skel-line w-40"></div>
-            <div class="skel skel-line w-24"></div>
-            <div class="skel skel-num"></div>
-          </article>
-        </div>
-      </section>
-
-      <!-- Token 统计 -->
-      <section class="page" data-page="tokens" id="page-tokens" hidden>
-        <header class="page-head">
-          <div>
-            <h1>Token 统计</h1>
-            <p class="lede" id="token-updated">正在读取本机用量…</p>
-          </div>
-          <button type="button" class="btn-ghost" id="reload-tokens">刷新统计</button>
-        </header>
-
-        <div class="tabs" id="token-tabs" role="tablist" aria-label="用量来源"></div>
-
-        <div class="card overview-card">
-          <div class="overview-top">
-            <div class="comp-wrap">
-              <div class="comp-bar" id="comp-bar" aria-label="Token 构成比例"></div>
-              <div class="comp-legend" id="comp-legend"></div>
-            </div>
-            <div class="pills" id="overview-range" data-target="overview">
-              <button type="button" data-range="today">今日</button>
-              <button type="button" data-range="7d">近 7 天</button>
-              <button type="button" data-range="30d" class="is-on">近 30 天</button>
-              <button type="button" data-range="all">总计</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="metric-row" id="token-metrics">
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-        </div>
-
-        <h2 class="block-title">Token 与调用趋势</h2>
-        <div class="card chart-card">
-          <div class="chart-head">
-            <p class="chart-note">堆叠柱是每日 Token 构成，虚线是调用次数。</p>
-            <div class="pills" id="chart-range" data-target="chart">
-              <button type="button" data-range="30d" class="is-on">近 30 天</button>
-              <button type="button" data-range="today">今日</button>
-              <button type="button" data-range="7d">近 7 天</button>
-              <button type="button" data-range="month">本月</button>
-            </div>
-          </div>
-          <div class="chart-legend" id="chart-legend"></div>
-          <div class="chart-box" id="chart-box">
-            <svg id="trend-chart" role="img" aria-label="每日 Token 趋势"></svg>
-            <div class="chart-empty" id="chart-empty" hidden>没读到该时间段的按日用量。</div>
-            <div class="chart-tip" id="chart-tip" hidden></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 积分与价格 -->
-      <section class="page" data-page="credits" id="page-credits" hidden>
-        <header class="page-head">
-          <div>
-            <h1>积分与价格</h1>
-            <p class="lede">积分换 token 只从本机 jsonl 三项反推。价格来自可编辑配置，没核实到的格子写「没读到」。</p>
-          </div>
-          <div class="controls">
-            <label class="inline">积分折算
-              <select id="conversion"></select>
-            </label>
-            <button type="button" class="btn-ghost" id="reload">刷新</button>
-          </div>
-        </header>
-
-        <div class="metric-row" id="stats">
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
-        </div>
-        <details class="caliber" id="rate-note-wrap">
-          <summary>估价口径</summary>
-          <p id="rate-note"></p>
-        </details>
-
-        <h2 class="block-title">WorkBuddy 积分规则</h2>
-        <div class="card rules-card" id="wb-rules-card">
-          <div id="wb-rules-body">
-            <p class="footnote tight">正在读取官方规则……</p>
-          </div>
-          <div class="table-wrap">
-            <table id="wb-multiplier-table">
-              <thead>
-                <tr>
-                  <th>模型</th>
-                  <th class="num">官方倍率</th>
-                  <th>说明</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <p class="footnote" id="wb-rules-formula"></p>
-        </div>
-
-        <h2 class="block-title">积分换 token（本机反推）</h2>
-        <div class="card">
-          <div class="table-wrap">
-            <table id="infer-table">
-              <thead>
-                <tr>
-                  <th>模型</th>
-                  <th class="num">样本</th>
-                  <th>状态</th>
-                  <th class="num">每积分·未命中</th>
-                  <th class="num">每积分·缓存</th>
-                  <th class="num">每积分·输出</th>
-                  <th>说明</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-
-        <h2 class="block-title">国内模型用量与价格对比</h2>
-        <div class="card">
-          <div class="table-wrap">
-            <table id="model-table">
-              <thead>
-                <tr>
-                  <th>模型</th>
-                  <th class="num">调用</th>
-                  <th class="num">实际积分</th>
-                  <th class="num">规则应扣</th>
-                  <th class="num">套餐折算</th>
-                  <th class="num">API 等效</th>
-                  <th class="num">缓存命中率</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div class="statusbar" id="cross-check-bar" hidden>
-            <span class="dot" id="cross-check-dot" aria-hidden="true"></span>
-            <span id="cross-check"></span>
-          </div>
-        </div>
-
-        <section id="prices-panel">
-          <h2 class="block-title">官方价与火山 AFP</h2>
-          <div class="split">
-            <div class="card">
-              <h3 class="sub">按量单价（元 / 百万 token）</h3>
-              <div class="table-wrap"><table id="price-table">
-                <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th></tr></thead>
-                <tbody></tbody>
-              </table></div>
-            </div>
-            <div class="card">
-              <h3 class="sub">火山 AFP 系数</h3>
-              <div class="table-wrap"><table id="afp-table">
-                <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
-                <tbody></tbody>
-              </table></div>
-              <details class="caliber">
-                <summary>AFP 公式与来源</summary>
-                <p id="afp-formula"></p>
-              </details>
-            </div>
-          </div>
-        </section>
-      </section>
-
-      <!-- 会话 -->
-      <section class="page" data-page="sessions" id="page-sessions" hidden>
-        <header class="page-head">
-          <div>
-            <h1>会话</h1>
-            <p class="lede">本机会话和每次调用的时间、用量。不含对话正文。合计覆盖全部会话。官方价按每次调用的北京时间区分高峰和闲时。点击一行可展开调用明细。</p>
-          </div>
-          <label class="inline grow">筛选
+          <button type="button" class="btn-ghost toolbar-only" data-show="credits" id="reload">刷新</button>
+          <label class="inline grow toolbar-only" data-show="sessions">筛选
             <input type="search" id="session-filter" placeholder="标题、模型或账号">
           </label>
-        </header>
-
-        <div class="metric-row" id="session-summary"></div>
-        <p class="footnote" id="session-price-note"></p>
-
-        <h2 class="block-title">按日消耗</h2>
-        <div class="card chart-card">
-          <div class="chart-head">
-            <p class="chart-note">按每次调用的北京时间归日。Token 图把缓存命中单独着色；官方价图叠高峰、闲时和标准价，并标出缓存命中省下的费用。</p>
-            <div class="pills" id="session-chart-metric">
-              <button type="button" data-metric="tokens" class="is-on">Token</button>
-              <button type="button" data-metric="credit">积分</button>
-              <button type="button" data-metric="official">官方价</button>
-            </div>
-            <div class="pills" id="session-chart-range">
-              <button type="button" data-range="7d">7 天</button>
-              <button type="button" data-range="30d" class="is-on">30 天</button>
-              <button type="button" data-range="90d">90 天</button>
-              <button type="button" data-range="all">全部</button>
-            </div>
+          <div class="pills toolbar-only" data-show="sessions" id="session-chart-range" aria-label="时间范围">
+            <button type="button" data-range="7d">7 天</button>
+            <button type="button" data-range="30d" class="is-on">30 天</button>
+            <button type="button" data-range="90d">90 天</button>
+            <button type="button" data-range="all">全部</button>
           </div>
-          <div class="chart-legend" id="session-chart-legend"></div>
-          <div class="chart-box" id="session-chart-box">
-            <svg id="session-chart" role="img" aria-label="按日消耗"></svg>
-            <div class="chart-empty" id="session-chart-empty" hidden>没读到按日用量。</div>
-            <div class="chart-tip" id="session-chart-tip" hidden></div>
+          <div class="theme-switch" role="group" aria-label="外观">
+            <button type="button" data-theme-set="light" id="theme-light">浅色</button>
+            <button type="button" data-theme-set="dark" id="theme-dark">深色</button>
           </div>
         </div>
+      </header>
 
-        <div class="card">
-          <div class="table-wrap">
-            <table id="session-table">
-              <thead>
-                <tr>
-                  <th>标题</th>
-                  <th>模型</th>
-                  <th>账号</th>
-                  <th class="num">调用</th>
-                  <th class="num">积分</th>
-                  <th class="num">Token</th>
-                  <th class="num">缓存命中</th>
-                  <th class="num">官方价</th>
-                  <th>最近调用</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+      <section class="banner" id="notice-panel" hidden></section>
+
+      <div class="workspace-body" id="main">
+      <section class="page is-on" data-page="accounts" id="page-accounts">
+        <div class="accounts-layout">
+          <div class="card sync-card pane-card">
+            <div class="pane-title">同步账号</div>
+            <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
+            <details class="sync-more">
+              <summary>同步说明</summary>
+              <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
+            </details>
+            <div class="sync-grid">
+              <label>源账号
+                <select id="sync-source"></select>
+              </label>
+              <label>目标账号
+                <select id="sync-target"></select>
+              </label>
+              <label>本机令牌（只用于写操作，不会显示在地址栏）
+                <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="从令牌文件粘贴">
+              </label>
+              <label>请输入「确认同步」
+                <input type="text" id="sync-confirm" autocomplete="off" placeholder="确认同步">
+              </label>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="sync-yes">
+              我已退出 WorkBuddy，并清楚这会改本机数据库（会先备份）。
+            </label>
+            <div class="actions">
+              <button type="button" id="sync-run" class="btn-danger" disabled>同步账号</button>
+              <button type="button" id="sync-refresh" class="btn-ghost">重新检查客户端</button>
+            </div>
+            <pre id="sync-log" hidden></pre>
           </div>
-          <p class="footnote" id="session-page"></p>
+          <div class="accounts-list pane-card">
+            <div class="section-head tight">
+              <h2>账号 <span class="count-pill" id="account-count">0</span></h2>
+            </div>
+            <div class="account-grid" id="account-grid">
+              <article class="account-card skel-card" aria-hidden="true">
+                <div class="skel skel-line w-40"></div>
+                <div class="skel skel-line w-24"></div>
+                <div class="skel skel-num"></div>
+              </article>
+              <article class="account-card skel-card" aria-hidden="true">
+                <div class="skel skel-line w-40"></div>
+                <div class="skel skel-line w-24"></div>
+                <div class="skel skel-num"></div>
+              </article>
+            </div>
+          </div>
         </div>
       </section>
-    </main>
+
+      <section class="page" data-page="tokens" id="page-tokens" hidden>
+        <div class="token-layout">
+          <div class="token-top">
+            <div class="tabs" id="token-tabs" role="tablist" aria-label="用量来源"></div>
+            <p class="toolbar-lede tight" id="token-updated">正在读取本机用量…</p>
+          </div>
+          <div class="metric-row" id="token-metrics">
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          </div>
+          <div class="token-mid">
+            <div class="card overview-card pane-card">
+              <div class="overview-top">
+                <div class="comp-wrap">
+                  <div class="comp-bar" id="comp-bar" aria-label="Token 构成比例"></div>
+                  <div class="comp-legend" id="comp-legend"></div>
+                </div>
+                <div class="pills" id="overview-range" data-target="overview">
+                  <button type="button" data-range="today">今日</button>
+                  <button type="button" data-range="7d">近 7 天</button>
+                  <button type="button" data-range="30d" class="is-on">近 30 天</button>
+                  <button type="button" data-range="all">总计</button>
+                </div>
+              </div>
+            </div>
+            <div class="card chart-card pane-card token-chart">
+              <div class="chart-head">
+                <p class="chart-note">堆叠柱是每日 Token 构成，虚线是调用次数。</p>
+                <div class="pills" id="chart-range" data-target="chart">
+                  <button type="button" data-range="30d" class="is-on">近 30 天</button>
+                  <button type="button" data-range="today">今日</button>
+                  <button type="button" data-range="7d">近 7 天</button>
+                  <button type="button" data-range="month">本月</button>
+                </div>
+              </div>
+              <div class="chart-legend" id="chart-legend"></div>
+              <div class="chart-box" id="chart-box">
+                <svg id="trend-chart" role="img" aria-label="每日 Token 趋势"></svg>
+                <div class="chart-empty" id="chart-empty" hidden>没读到该时间段的按日用量。</div>
+                <div class="chart-tip" id="chart-tip" hidden></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="credits" id="page-credits" hidden>
+        <div class="credits-layout">
+          <div class="metric-row" id="stats">
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+            <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          </div>
+          <details class="caliber" id="rate-note-wrap">
+            <summary>估价口径</summary>
+            <p id="rate-note"></p>
+          </details>
+          <div class="credits-grid">
+            <div class="card rules-card pane-card" id="wb-rules-card">
+              <div class="pane-title">WorkBuddy 积分规则</div>
+              <div class="pane-scroll">
+                <div id="wb-rules-body">
+                  <p class="footnote tight">正在读取官方规则……</p>
+                </div>
+                <div class="table-wrap">
+                  <table id="wb-multiplier-table">
+                    <thead>
+                      <tr>
+                        <th>模型</th>
+                        <th class="num">官方倍率</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <p class="footnote" id="wb-rules-formula"></p>
+              </div>
+            </div>
+            <div class="card pane-card">
+              <div class="pane-title">积分换 token（本机反推）</div>
+              <div class="table-wrap pane-scroll">
+                <table id="infer-table">
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th class="num">样本</th>
+                      <th>状态</th>
+                      <th class="num">每积分·未命中</th>
+                      <th class="num">每积分·缓存</th>
+                      <th class="num">每积分·输出</th>
+                      <th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card pane-card credits-models">
+              <div class="pane-title">国内模型用量与价格对比</div>
+              <div class="table-wrap pane-scroll">
+                <table id="model-table">
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th class="num">调用</th>
+                      <th class="num">实际积分</th>
+                      <th class="num">规则应扣</th>
+                      <th class="num">套餐折算</th>
+                      <th class="num">API 等效</th>
+                      <th class="num">缓存命中率</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="statusbar" id="cross-check-bar" hidden>
+                <span class="dot" id="cross-check-dot" aria-hidden="true"></span>
+                <span id="cross-check"></span>
+              </div>
+            </div>
+            <section class="credits-prices" id="prices-panel">
+              <div class="split">
+                <div class="card pane-card">
+                  <div class="pane-title">按量单价（元 / 百万 token）</div>
+                  <div class="table-wrap pane-scroll"><table id="price-table">
+                    <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th></tr></thead>
+                    <tbody></tbody>
+                  </table></div>
+                </div>
+                <div class="card pane-card">
+                  <div class="pane-title">火山 AFP 系数</div>
+                  <div class="table-wrap pane-scroll"><table id="afp-table">
+                    <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
+                    <tbody></tbody>
+                  </table></div>
+                  <details class="caliber">
+                    <summary>AFP 公式与来源</summary>
+                    <p id="afp-formula"></p>
+                  </details>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="sessions" id="page-sessions" hidden>
+        <div class="sessions-layout">
+          <div class="metric-row" id="session-summary"></div>
+          <div class="dash-mid">
+            <div class="card chart-card pane-card">
+              <div class="chart-head">
+                <p class="chart-note">按北京时间归日。Token 图单独着色缓存命中；官方价图叠高峰、闲时和标准价。</p>
+                <div class="pills" id="session-chart-metric">
+                  <button type="button" data-metric="tokens" class="is-on">Token</button>
+                  <button type="button" data-metric="credit">积分</button>
+                  <button type="button" data-metric="official">官方价</button>
+                </div>
+              </div>
+              <div class="chart-legend" id="session-chart-legend"></div>
+              <div class="chart-box" id="session-chart-box">
+                <svg id="session-chart" role="img" aria-label="按日消耗"></svg>
+                <div class="chart-empty" id="session-chart-empty" hidden>没读到按日用量。</div>
+                <div class="chart-tip" id="session-chart-tip" hidden></div>
+              </div>
+            </div>
+            <aside class="side-panel card pane-card" id="session-side">
+              <div class="side-block">
+                <div class="side-h">
+                  官方价拆分
+                  <button type="button" class="info-btn" id="session-info-btn" aria-expanded="false" aria-controls="session-info-pop" title="计价说明">说明</button>
+                </div>
+                <div class="info-pop" id="session-info-pop" hidden>
+                  <p id="session-price-note"></p>
+                </div>
+                <div id="session-breakdown" class="breakdown"></div>
+              </div>
+              <div class="side-block grow-block">
+                <div class="side-h">按模型花费</div>
+                <div id="session-top-models" class="top-models"></div>
+              </div>
+            </aside>
+          </div>
+          <div class="master-detail" id="session-split">
+            <div class="pane pane-master card pane-card">
+              <div class="table-wrap sticky-head" id="session-table-wrap">
+                <table id="session-table">
+                  <thead>
+                    <tr>
+                      <th>标题</th>
+                      <th>模型</th>
+                      <th>账号</th>
+                      <th class="num">调用</th>
+                      <th class="num">积分</th>
+                      <th class="num">Token</th>
+                      <th class="num">缓存命中</th>
+                      <th class="num">官方价</th>
+                      <th>最近调用</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="footnote pane-foot" id="session-page"></p>
+            </div>
+            <div class="detail-backdrop" id="session-detail-backdrop" hidden></div>
+            <aside class="pane pane-detail card pane-card" id="session-detail-pane" aria-label="会话调用明细">
+              <div class="detail-head">
+                <div class="detail-head-text">
+                  <div class="pane-title" id="session-detail-title">调用明细</div>
+                  <p class="detail-sub" id="session-detail-sub">在左边选一行会话，查看每次调用的时间和费用。</p>
+                </div>
+                <button type="button" class="btn-ghost btn-icon" id="session-detail-close" title="关闭" aria-label="关闭明细">关闭</button>
+              </div>
+              <div class="detail-body" id="session-detail-body">
+                <div class="empty-state quiet">
+                  <p class="empty-title">还没选会话</p>
+                  <p class="empty-desc">点击左侧表格里的一行，调用时间、高峰闲时、缓存命中和官方价会显示在这里。不含对话正文。</p>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+      </div>
+    </div>
   </div>
   <script src="/app.js"></script>
 </body>

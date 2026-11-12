@@ -212,9 +212,27 @@
     const h = (location.hash || "").replace(/^#\/?/, "").split("?")[0];
     return PAGES.indexOf(h) >= 0 ? h : "accounts";
   }
+  const PAGE_META = {
+    accounts: { title: "账号同步", lede: "查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。" },
+    tokens: { title: "Token 统计", lede: "本机 jsonl 的 Token 与调用统计。" },
+    credits: { title: "积分与价格", lede: "积分换 token 只从本机 jsonl 三项反推。价格来自可编辑配置，没核实到的格子写「没读到」。" },
+    sessions: { title: "会话", lede: "本机会话和每次调用的时间、用量。不含对话正文。合计覆盖全部会话。" },
+  };
+
+  function syncToolbar(name) {
+    document.body.setAttribute("data-page", name);
+    const meta = PAGE_META[name] || PAGE_META.accounts;
+    const tt = $("toolbar-title");
+    const tl = $("toolbar-lede");
+    if (tt) tt.textContent = meta.title;
+    if (tl) { tl.textContent = meta.lede; tl.title = meta.lede; }
+    document.title = meta.title + " · WorkBuddy 本机看板";
+  }
+
   function showPage(name, opts) {
     if (PAGES.indexOf(name) < 0) name = "accounts";
     state.page = name;
+    syncToolbar(name);
     document.querySelectorAll(".page").forEach((el) => {
       const on = el.getAttribute("data-page") === name;
       el.classList.toggle("is-on", on);
@@ -231,7 +249,10 @@
       requestAnimationFrame(() => renderTokenPage());
     }
     if (name === "sessions") {
-      requestAnimationFrame(() => renderSessionChart());
+      requestAnimationFrame(() => {
+        renderSessionChart();
+        syncDetailOpen();
+      });
     }
   }
   window.addEventListener("hashchange", () => showPage(currentHashPage(), { silent: true }));
@@ -242,31 +263,31 @@
     if (meta.app_version) $("app-version").textContent = "v" + meta.app_version;
     const ed = meta.edition || {};
     const notice = $("notice-panel");
-    if (ed.dual) {
-      notice.hidden = false;
-      const opts = (ed.editions || [])
-        .map((e) => {
-          const mark = e.key === ed.edition ? "（当前）" : "";
-          const n = e.readable
-            ? (e.session_count || 0) + " 个会话 / " + (e.account_count || 0) + " 个账号"
-            : "读取失败";
-          return (
-            "<button type='button' class='btn-ghost' data-ed='" +
-            escapeHtml(e.key) + "'>" +
-            escapeHtml(e.label) + " " + n + " " + mark + "</button>"
-          );
-        })
-        .join(" ");
-      notice.innerHTML = "<p>" + escapeHtml(ed.notice || "请选择要查看的版本。") + "</p><div class='actions'>" + opts + "</div>";
-      notice.querySelectorAll("button[data-ed]").forEach((btn) => {
+    const box = $("toolbar-edition");
+    if (notice) { notice.hidden = true; notice.innerHTML = ""; }
+    if (ed.dual && box) {
+      box.hidden = false;
+      const current = state.edition || ed.edition;
+      box.innerHTML = (ed.editions || []).map((e) => {
+        const n = e.readable
+          ? (e.session_count || 0) + " 个会话 / " + (e.account_count || 0) + " 个账号"
+          : "读取失败";
+        const on = e.key === current ? " is-on" : "";
+        return (
+          "<button type='button' class='ed-pill" + on + "' data-ed='" +
+          escapeHtml(e.key) + "' title='" + escapeHtml(n) + "'>" +
+          escapeHtml(e.label) + "</button>"
+        );
+      }).join("");
+      box.querySelectorAll("button[data-ed]").forEach((btn) => {
         btn.addEventListener("click", () => {
           state.edition = btn.getAttribute("data-ed");
           reload();
         });
       });
-    } else {
-      notice.hidden = true;
-      notice.innerHTML = "";
+    } else if (box) {
+      box.hidden = true;
+      box.innerHTML = "";
     }
   }
 
@@ -1067,13 +1088,8 @@
 
     const officialSub = [];
     if (priced) {
-      const parts = [];
-      if (cnyPeak) parts.push("高峰 " + fmtCny(cnyPeak));
-      if (cnyOff) parts.push("闲时 " + fmtCny(cnyOff));
-      if (cnyStd) parts.push("标准 " + fmtCny(cnyStd));
-      if (parts.length) officialSub.push(parts.join(" · "));
-      if (callsPeak || callsOff) officialSub.push("高峰 " + callsPeak + " 次，闲时 " + callsOff + " 次");
       if (saved != null) officialSub.push("缓存命中省 " + fmtCny(saved));
+      if (missingCount) officialSub.push(missingCount + " 个模型未计入");
     }
 
     const cards = [
@@ -1120,6 +1136,119 @@
       if (isFilter) bits.push("上面数字是当前筛选结果，不是全部会话。");
       noteEl.textContent = bits.join(" ");
     }
+    renderSessionSide({
+      priced: priced,
+      cny: cny,
+      cnyPeak: cnyPeak,
+      cnyOff: cnyOff,
+      cnyStd: cnyStd,
+      saved: saved,
+      isFilter: isFilter,
+      rows: filteredRows || [],
+    });
+  }
+
+  function modelsForSide(filteredRows, isFilter) {
+    if (isFilter) {
+      const acc = {};
+      (filteredRows || []).forEach((s) => {
+        const list = (s.usage && s.usage.official_cny_by_model) || [];
+        if (list.length) {
+          list.forEach((m) => {
+            const k = m.model || "—";
+            if (!acc[k]) acc[k] = { model: k, cny: 0, saved: 0, calls: 0, priced: false, status: m.status };
+            if (m.cny != null && (m.status === "ok" || m.status === "partial")) {
+              acc[k].cny += Number(m.cny);
+              acc[k].priced = true;
+              acc[k].status = "ok";
+            }
+            if (m.cache_hit_saved != null) acc[k].saved += Number(m.cache_hit_saved);
+            acc[k].calls += Number(m.calls || 0);
+          });
+        } else {
+          const u = s.usage || {};
+          const k = s.model || (u.model_counts ? Object.keys(u.model_counts)[0] : "—");
+          if (!acc[k]) acc[k] = { model: k, cny: 0, saved: 0, calls: 0, priced: false, status: u.official_cny_status };
+          if ((u.official_cny_status === "ok" || u.official_cny_status === "partial") && u.official_cny != null) {
+            acc[k].cny += Number(u.official_cny);
+            acc[k].priced = true;
+            acc[k].status = "ok";
+          }
+          if (u.cache_hit_saved != null) acc[k].saved += Number(u.cache_hit_saved);
+          acc[k].calls += Number(u.calls || 0);
+        }
+      });
+      return Object.keys(acc).map((k) => acc[k]);
+    }
+    const o = (state.sessionTotals && state.sessionTotals.official) || {};
+    let list = o.official_cny_by_model || [];
+    if (!list.length && state.usage && state.usage.by_model) {
+      list = (state.usage.by_model || []).map((m) => ({
+        model: m.model,
+        cny: m.equivalent_cny,
+        saved: m.cache_hit_saved,
+        calls: m.calls,
+        status: m.equivalent_cny_status,
+        cache_hit_saved: m.cache_hit_saved,
+      }));
+    }
+    return list.map((m) => ({
+      model: m.model,
+      cny: m.cny != null ? m.cny : m.equivalent_cny,
+      saved: m.cache_hit_saved != null ? m.cache_hit_saved : m.saved,
+      calls: m.calls,
+      priced: m.status === "ok" || m.status === "partial" || (m.cny != null && m.status !== "没读到"),
+      status: m.status,
+    }));
+  }
+
+  function renderSessionSide(ctx) {
+    const br = $("session-breakdown");
+    const top = $("session-top-models");
+    if (!br || !top) return;
+    const peak = Number(ctx.cnyPeak || 0);
+    const off = Number(ctx.cnyOff || 0);
+    const std = Number(ctx.cnyStd || 0);
+    const total = (ctx.priced && ctx.cny != null) ? Number(ctx.cny) : (peak + off + std);
+    const rows = [
+      { lab: "高峰", val: peak, cls: "is-peak" },
+      { lab: "闲时", val: off, cls: "is-off" },
+      { lab: "标准", val: std, cls: "is-std" },
+    ];
+    if (!ctx.priced || !total) {
+      br.innerHTML = '<p class="footnote tight">还没有可展示的官方价拆分。</p>';
+    } else {
+      br.innerHTML = rows.map((r) => {
+        const pctW = total ? Math.max(0, Math.min(100, (r.val / total) * 100)) : 0;
+        return (
+          '<div class="brk-row">' +
+          '<span class="lab">' + r.lab + "</span>" +
+          '<span class="brk-bar ' + r.cls + '"><i style="width:' + pctW.toFixed(1) + '%"></i></span>' +
+          '<span class="val">' + (r.val ? escapeHtml(fmtCny(r.val)) : "—") + "</span>" +
+          "</div>"
+        );
+      }).join("") +
+      '<div class="brk-row"><span class="lab">合计</span><span></span><span class="val">' +
+      escapeHtml(fmtCny(ctx.cny)) + "</span></div>" +
+      (ctx.saved != null ? '<div class="brk-save">缓存命中省 ' + escapeHtml(fmtCny(ctx.saved)) + "</div>" : "");
+    }
+    const models = modelsForSide(ctx.rows, ctx.isFilter).slice();
+    models.sort((a, b) => (Number(b.cny) || 0) - (Number(a.cny) || 0));
+    if (!models.length) {
+      top.innerHTML = '<p class="footnote tight">还没有按模型的花费。</p>';
+      return;
+    }
+    top.innerHTML = models.map((m) => {
+      const priced = m.priced && m.cny != null;
+      return (
+        '<div class="top-row">' +
+        '<span class="nm" title="' + escapeHtml(m.model || "") + '">' + escapeHtml(m.model || "—") + "</span>" +
+        '<span class="cny' + (priced ? "" : " miss") + '">' + (priced ? escapeHtml(fmtCny(m.cny)) : "没读到") + "</span>" +
+        '<span class="sub">' + escapeHtml(fmt(m.calls || 0, 0) + " 次") +
+        (m.saved != null && priced ? " · 省 " + fmtCny(m.saved) : "") + "</span>" +
+        "</div>"
+      );
+    }).join("");
   }
 
   function renderSessionChart() {
@@ -1322,17 +1451,18 @@
     );
   }
 
+
   async function loadSessionCalls(sid, more) {
     if (!sid) return;
     const cur = state.sessionCalls[sid] || { calls: [], total: 0, offset: 0 };
     if (cur.loading) return;
     if (!more && cur.calls && cur.calls.length) {
-      renderSessions();
+      renderSessionDetail();
       return;
     }
     const offset = more ? (cur.calls || []).length : 0;
     state.sessionCalls[sid] = Object.assign({}, cur, { loading: true, error: "" });
-    renderSessions();
+    renderSessionDetail();
     try {
       const obj = await get("/api/sessions/" + encodeURIComponent(sid) + "/calls?limit=200&offset=" + offset);
       if (!obj || obj.ok === false) {
@@ -1350,7 +1480,95 @@
     } catch (e) {
       state.sessionCalls[sid] = Object.assign({}, cur, { loading: false, error: "读取失败" });
     }
-    renderSessions();
+    renderSessionDetail();
+  }
+
+  function syncDetailOpen() {
+    const split = $("session-split");
+    if (!split) return;
+    const open = !!state.openSession;
+    split.classList.toggle("is-open", open);
+    const bd = $("session-detail-backdrop");
+    if (bd) bd.hidden = !open;
+  }
+
+  function closeSessionDetail() {
+    state.openSession = "";
+    syncDetailOpen();
+    const tb = $("session-table") && $("session-table").querySelector("tbody");
+    if (tb) tb.querySelectorAll("tr.session-row").forEach((tr) => tr.classList.remove("is-selected"));
+    renderSessionDetail();
+  }
+
+  function selectSession(id) {
+    const opening = state.openSession !== id;
+    state.openSession = opening ? id : "";
+    syncDetailOpen();
+    const tb = $("session-table") && $("session-table").querySelector("tbody");
+    if (tb) {
+      tb.querySelectorAll("tr.session-row").forEach((tr) => {
+        tr.classList.toggle("is-selected", tr.getAttribute("data-id") === state.openSession);
+      });
+    }
+    renderSessionDetail();
+    if (state.openSession) loadSessionCalls(state.openSession, false);
+  }
+
+  function renderSessionDetail() {
+    const title = $("session-detail-title");
+    const sub = $("session-detail-sub");
+    const body = $("session-detail-body");
+    if (!body) return;
+    syncDetailOpen();
+    const sid = state.openSession;
+    if (!sid) {
+      if (title) title.textContent = "调用明细";
+      if (sub) sub.textContent = "在左边选一行会话，查看每次调用的时间和费用。";
+      body.innerHTML =
+        '<div class="empty-state quiet">' +
+        '<p class="empty-title">还没选会话</p>' +
+        '<p class="empty-desc">点击左侧表格里的一行，调用时间、高峰闲时、缓存命中和官方价会显示在这里。不含对话正文。</p>' +
+        "</div>";
+      return;
+    }
+    const s = (state.sessions || []).find((x) => x.id === sid) || {};
+    const u = s.usage || {};
+    const hitRate = u.cache_hit_rate != null
+      ? u.cache_hit_rate
+      : (u.prompt_tokens ? Math.min(u.cache_hit_tokens || 0, u.prompt_tokens) / u.prompt_tokens : null);
+    const models = u.model_counts ? Object.keys(u.model_counts).join(", ") : (s.model || "—");
+    const savedLine = (u.cache_hit_saved != null && (u.official_cny_status === "ok" || u.official_cny_status === "partial"))
+      ? fmtCny(u.cache_hit_saved) : "";
+    const peakLine = [
+      u.official_cny_peak ? "高峰 " + fmtCny(u.official_cny_peak) : "",
+      u.official_cny_offpeak ? "闲时 " + fmtCny(u.official_cny_offpeak) : "",
+      u.official_cny_standard ? "标准 " + fmtCny(u.official_cny_standard) : "",
+    ].filter(Boolean).join(" · ");
+    if (title) title.textContent = s.title || "（无标题）";
+    if (sub) sub.textContent = (models || "—") + (u.last_call_at ? " · 最近 " + u.last_call_at : "") + " · 北京时间";
+    body.innerHTML =
+      '<div class="detail-grid">' +
+      "<div><div class='k'>调用</div><div class='v'>" + escapeHtml(fmt(u.calls || 0, 0)) + "</div></div>" +
+      "<div><div class='k'>积分</div><div class='v'>" + escapeHtml(fmt(u.credit || 0, 2)) + "</div></div>" +
+      "<div><div class='k'>输入 token</div><div class='v'>" + escapeHtml(fmt(u.prompt_tokens || 0, 0)) + "</div></div>" +
+      "<div><div class='k'>缓存命中</div><div class='v'>" + escapeHtml(fmt(u.cache_hit_tokens || 0, 0)) +
+        (hitRate == null ? "" : "（" + escapeHtml(pct(hitRate)) + "）") + "</div></div>" +
+      "<div><div class='k'>未命中输入</div><div class='v'>" + escapeHtml(fmt(u.uncached_input || 0, 0)) + "</div></div>" +
+      "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(u.completion_tokens || 0, 0)) + "</div></div>" +
+      "<div><div class='k'>官方价</div><div class='v'>" + officialCell(u) + "</div></div>" +
+      "<div><div class='k'>缓存命中省</div><div class='v'>" + (savedLine ? '<span class="saved">' + escapeHtml(savedLine) + "</span>" : na("没读到")) + "</div></div>" +
+      "<div><div class='k'>首次调用</div><div class='v'>" + escapeHtml(u.first_call_at || "—") + "</div></div>" +
+      "<div><div class='k'>最近调用</div><div class='v'>" + escapeHtml(u.last_call_at || "—") + "</div></div>" +
+      "</div>" +
+      (peakLine ? "<p class='footnote tight'>" + escapeHtml(peakLine) + "</p>" : "") +
+      renderCallsPane(sid) +
+      "<p class='footnote'>不含对话正文。时间是北京时间。</p>";
+    body.querySelectorAll("button[data-more]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        loadSessionCalls(btn.getAttribute("data-more"), true);
+      });
+    });
   }
 
   function renderSessions() {
@@ -1361,14 +1579,20 @@
       const blob = [s.title, s.model, s.display_id, (s.usage && s.usage.user_id) || ""].join(" ").toLowerCase();
       return blob.indexOf(q) >= 0;
     });
-    const tb = $("session-table").querySelector("tbody");
+    const table = $("session-table");
+    if (!table) return;
+    const tb = table.querySelector("tbody");
+    const wrap = $("session-table-wrap");
+    const scroll = wrap ? wrap.scrollTop : 0;
     const isFilter = !!q;
     if (!rows.length) {
       const emptyTitle = q ? "没有符合条件的会话" : "还没有会话";
       const emptyDesc = q ? "试试别的标题、模型或账号。" : "这个数据目录里还没有读到会话。";
       tb.innerHTML = emptyRow(9, emptyTitle, emptyDesc);
-      $("session-page").textContent = "0 条";
+      const pg = $("session-page");
+      if (pg) pg.textContent = "0 条";
       renderSessionSummary([], isFilter);
+      if (state.openSession) closeSessionDetail();
       return;
     }
     renderSessionSummary(rows, isFilter);
@@ -1379,42 +1603,10 @@
           ? u.cache_hit_rate
           : (u.prompt_tokens ? Math.min(u.cache_hit_tokens || 0, u.prompt_tokens) / u.prompt_tokens : null);
         const models = u.model_counts ? Object.keys(u.model_counts).join(", ") : s.model;
-        const open = state.openSession === s.id;
+        const selected = state.openSession === s.id;
         const whenL = lastCallLabel(s);
-        const savedLine = (u.cache_hit_saved != null && (u.official_cny_status === "ok" || u.official_cny_status === "partial"))
-          ? "缓存命中省 " + fmtCny(u.cache_hit_saved)
-          : "";
-        const peakLine = [
-          u.official_cny_peak ? "高峰 " + fmtCny(u.official_cny_peak) : "",
-          u.official_cny_offpeak ? "闲时 " + fmtCny(u.official_cny_offpeak) : "",
-          u.official_cny_standard ? "标准 " + fmtCny(u.official_cny_standard) : "",
-        ].filter(Boolean).join(" · ");
-        const callsHtml = open ? renderCallsPane(s.id) : "";
-        const first = u.first_call_at ? "首次 " + u.first_call_at : "";
-        const detail =
-          "<tr class='session-detail' data-for='" + escapeHtml(s.id) + "'" + (open ? "" : " hidden") + ">" +
-          "<td colspan='9'><div class='detail-grid'>" +
-          "<div><div class='k'>调用</div><div class='v'>" + escapeHtml(fmt(u.calls || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>积分</div><div class='v'>" + escapeHtml(fmt(u.credit || 0, 2)) + "</div></div>" +
-          "<div><div class='k'>输入 token</div><div class='v'>" + escapeHtml(fmt(u.prompt_tokens || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>缓存命中</div><div class='v'>" + escapeHtml(fmt(u.cache_hit_tokens || 0, 0)) +
-            (hitRate == null ? "" : "（" + escapeHtml(pct(hitRate)) + "）") + "</div></div>" +
-          "<div><div class='k'>未命中输入</div><div class='v'>" + escapeHtml(fmt(u.uncached_input || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(u.completion_tokens || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>官方价</div><div class='v'>" + officialCell(u) + "</div></div>" +
-          "<div><div class='k'>缓存命中省</div><div class='v'>" + (savedLine ? '<span class="saved">' + escapeHtml(fmtCny(u.cache_hit_saved)) + "</span>" : na("没读到")) + "</div></div>" +
-          "<div><div class='k'>首次调用</div><div class='v'>" + escapeHtml(u.first_call_at || "—") + "</div></div>" +
-          "<div><div class='k'>最近调用</div><div class='v'>" + escapeHtml(u.last_call_at || "—") + "</div></div>" +
-          "</div>" +
-          (peakLine ? "<p class='footnote tight'>" + escapeHtml(peakLine) + "</p>" : "") +
-          "<p class='footnote'>不含对话正文。时间是北京时间。模型：" + escapeHtml(models || "—") +
-          (u.official_cny_note ? "。" + escapeHtml(u.official_cny_note) : "") +
-          (u.wb_rule_expected_note ? " " + escapeHtml(u.wb_rule_expected_note) : "") +
-          (first ? "。" + escapeHtml(first) : "") + "</p>" +
-          callsHtml +
-          "</td></tr>";
         return (
-          "<tr class='session-row" + (open ? " is-open" : "") + "' data-id='" + escapeHtml(s.id) + "'>" +
+          "<tr class='session-row" + (selected ? " is-selected" : "") + "' data-id='" + escapeHtml(s.id) + "'>" +
           "<td class='clip title' title='" + escapeHtml(s.title || "（无标题）") + "'>" + escapeHtml(s.title || "（无标题）") + "</td>" +
           "<td class='model'>" + modelTags(models) + "</td>" +
           "<td class='clip' title='" + escapeHtml(s.display_id || "—") + "'>" + escapeHtml(s.display_id || "—") + "</td>" +
@@ -1425,31 +1617,27 @@
           '<td class="num cache">' + cacheCell(u.cache_hit_tokens, hitRate) + "</td>" +
           '<td class="num">' + officialCell(u) + "</td>" +
           "<td class='date' title='" + escapeHtml(whenL.full) + "'>" + escapeHtml(whenL.short) + "</td>" +
-          "</tr>" +
-          detail
+          "</tr>"
         );
       })
       .join("");
     const totalAll = (state.sessionTotals && state.sessionTotals.usage && state.sessionTotals.usage.session_count) || "";
-    $("session-page").textContent =
-      "本页 " + rows.length + " 条（最多 200 条最近会话）" +
-      (totalAll && !isFilter ? "，合计覆盖全部 " + totalAll + " 个会话" : "") +
-      (isFilter ? "，当前为筛选结果" : "");
+    const pg = $("session-page");
+    if (pg) {
+      pg.textContent =
+        "本页 " + rows.length + " 条（最多 200 条最近会话）" +
+        (totalAll && !isFilter ? "，合计覆盖全部 " + totalAll + " 个会话" : "") +
+        (isFilter ? "，当前为筛选结果" : "");
+    }
     tb.querySelectorAll("tr.session-row").forEach((tr) => {
-      tr.addEventListener("click", () => {
-        const id = tr.getAttribute("data-id");
-        const opening = state.openSession !== id;
-        state.openSession = opening ? id : "";
-        renderSessions();
-        if (opening) loadSessionCalls(id, false);
-      });
+      tr.addEventListener("click", () => selectSession(tr.getAttribute("data-id")));
     });
-    tb.querySelectorAll("button[data-more]").forEach((btn) => {
-      btn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        loadSessionCalls(btn.getAttribute("data-more"), true);
-      });
-    });
+    if (wrap) wrap.scrollTop = scroll;
+    if (state.openSession && !rows.some((s) => s.id === state.openSession)) {
+      closeSessionDetail();
+    } else {
+      renderSessionDetail();
+    }
   }
 
   function fillCreditRules(rules, rates) {
@@ -1596,6 +1784,30 @@
     else if (mq.addListener) mq.addListener(onChange);
   } catch (e) {}
   syncThemeButtons();
+
+  const infoBtn = $("session-info-btn");
+  const infoPop = $("session-info-pop");
+  if (infoBtn && infoPop) {
+    infoBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const open = infoPop.hidden;
+      infoPop.hidden = !open;
+      infoBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.addEventListener("click", (ev) => {
+      if (infoPop.hidden) return;
+      if (infoPop.contains(ev.target) || infoBtn.contains(ev.target)) return;
+      infoPop.hidden = true;
+      infoBtn.setAttribute("aria-expanded", "false");
+    });
+  }
+  const closeBtn = $("session-detail-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeSessionDetail);
+  const bd = $("session-detail-backdrop");
+  if (bd) bd.addEventListener("click", closeSessionDetail);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && state.openSession) closeSessionDetail();
+  });
 
   showPage(currentHashPage(), { silent: true });
   reload();

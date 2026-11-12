@@ -353,6 +353,7 @@ def _session_usage_public(b: dict) -> dict:
         "official_cny_cache_hit": official.get("cny_cache_hit"),
         "official_cny_output": official.get("cny_output"),
         "cache_hit_saved": official.get("cache_hit_saved"),
+        "official_cny_by_model": official.get("by_model") or [],
         "cache_hit_rate": (
             round(min(int(b.get("cache_hit_tokens") or 0), int(b.get("prompt_tokens") or 0)) / int(b["prompt_tokens"]), 6)
             if b.get("prompt_tokens") else None
@@ -732,6 +733,7 @@ def _official_totals_from(official: dict, totals: dict, cny_per_credit, session_
         "official_cny_cache_hit": official.get("cny_cache_hit"),
         "official_cny_output": official.get("cny_output"),
         "cache_hit_saved": official.get("cache_hit_saved"),
+        "official_cny_by_model": official.get("by_model") or [],
         "cache_hit_rate": (
             round(min(int(totals.get("cache_hit_tokens") or 0), int(totals.get("prompt_tokens") or 0)) / int(totals["prompt_tokens"]), 6)
             if totals.get("prompt_tokens") else None

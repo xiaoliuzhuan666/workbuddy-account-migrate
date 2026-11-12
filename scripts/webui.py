@@ -419,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "bind": STATE.bind,
             "port": STATE.port,
-            "app_version": "1.7.1",
+            "app_version": "1.8.0",
             "token_required_for_writes": True,
             "token_path": str(STATE.token_path) if STATE.token_path else "",
             "confirm_text": CONFIRM_TEXT,

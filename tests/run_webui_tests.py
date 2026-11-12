@@ -700,6 +700,8 @@ def test_session_official_cost():
         expected_saved = expected_saved_a  # 会话乙无缓存命中
         check("接口合计含缓存命中省下的费用", totals.get("cache_hit_saved") is not None and abs(totals["cache_hit_saved"] - expected_saved) < 1e-9, str(totals))
         check("合计注明按调用时间区分高峰", "高峰" in (totals.get("official_cny_period_note") or ""), str(totals))
+        bym = totals.get("official_cny_by_model") or []
+        check("合计带按模型官方价", isinstance(bym, list) and any((m.get("model") == "deepseek-v4.1-flash" and m.get("cny") is not None) for m in bym), str(bym))
         check("时间线按日返回", isinstance((obj.get("timeline") or {}).get("by_day"), list) and (obj["timeline"]["by_day"]), str(obj.get("timeline")))
 
         st, calls, raw2 = _req(port, "GET", "/api/sessions/%s/calls?limit=50" % sid_a)
@@ -903,6 +905,22 @@ def test_peak_hours_and_cache_savings():
     check("kimi-k3-2 仍没读到", k32["status"] == NOT_FOUND, str(k32))
 
 
+
+def test_desktop_layout():
+    print("\n[桌面端布局]")
+    html = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "webui" / "styles.css").read_text(encoding="utf-8")
+    js = (ROOT / "webui" / "app.js").read_text(encoding="utf-8")
+    check("页面不再限制 1180 宽", "max-width: 1180" not in css and "max-width: 1180" not in html)
+    check("有顶栏和标题", 'id="toolbar"' in html and 'id="toolbar-title"' in html)
+    check("外观切换在顶栏", 'id="theme-light"' in html and 'class="toolbar"' in html)
+    check("会话有侧栏拆分和主从分栏", 'id="session-side"' in html and 'id="session-detail-pane"' in html and 'id="session-split"' in html)
+    check("工作区铺满宽度", ".workspace" in css and "max-width: none" in css)
+    check("1024 下明细为抽屉", "translateX(100%)" in css and "master-detail.is-open" in css)
+    check("脚本按行选中而不是表内展开", "function renderSessionDetail" in js and "selectSession" in js)
+    check("版本是 1.8", 'v1.8.0' in html)
+
+
 def main():
     print("workbuddy 本机网页版测试")
     print("仓库：%s" % ROOT)
@@ -919,6 +937,7 @@ def main():
         test_prices_api_and_refresh_skeleton,
         test_session_official_cost,
         test_peak_hours_and_cache_savings,
+        test_desktop_layout,
         test_bind_cli,
     ):
         try:
