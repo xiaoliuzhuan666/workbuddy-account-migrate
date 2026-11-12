@@ -172,6 +172,24 @@
         "status": "ok"
       },
       {
+        "id": "kimi-k2.6",
+        "match": [
+          "kimi-k2.6",
+          "Kimi-K2.6",
+          "Kimi K2.6"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 6.5,
+        "output": 27.0,
+        "cached_read": 1.1,
+        "source": "https://platform.kimi.com/docs/pricing/chat",
+        "source_via": "月之暗面官方「模型推理价格说明」页 K2 系列表（2026-11-12 从该页源代码读到：列顺序为 模型 / 输入 / 输出 / 缓存命中；kimi-k2.6 为 ¥6.50 / ¥27.00 / ¥1.10 每百万 tokens）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "取自 Kimi 开放平台官方定价页 K2 系列表。该页未给出高峰/闲时价，按标准价计。不能把此价套用到 kimi-k3-2。"
+      },
+      {
         "id": "qwen3.8-max",
         "match": [
           "qwen3.8-max",
@@ -213,6 +231,31 @@
         "source_via": "DeepSeek 官方定价页（2026-11-12 核对）"
       },
       {
+        "id": "deepseek-v4-pro",
+        "match": [
+          "deepseek-v4-pro",
+          "DeepSeek-V4-Pro",
+          "DeepSeek-V4-Pro-0813",
+          "deepseek-v4-pro-0813"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 4.5,
+        "output": 13.5,
+        "cached_read": 0.15,
+        "peak": {
+          "input": 9.0,
+          "output": 27.0,
+          "cached_read": 0.3,
+          "note": "官文：空闲时段价格为高峰时段价格的一半。高峰窗口与 Flash 相同。"
+        },
+        "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing.md",
+        "source_via": "DeepSeek 官方定价页「模型细节」表 deepseek-v4-pro 列（2026-11-12 再读，模型版本 DeepSeek-V4-Pro-0813）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "2026-11-12 再读官方定价页。闲时（空闲时段）：缓存未命中输入 4.5 元、缓存命中 0.15 元、输出 13.5 元 / 百万 tokens；高峰：9.0 / 0.30 / 27.0。高峰规则与同页 Flash 相同：北京时间周一至周五（不含中国法定节假日）9:00-12:00、14:00-18:00 为高峰；其余时段含周末及法定节假日全天为闲时。无时间戳的调用按闲时计并标明。"
+      },
+      {
         "id": "hy4-free",
         "match": [
           "hy4-free",
@@ -230,6 +273,41 @@
         "retrieved_at": "2026-11-12",
         "status": "没读到",
         "note": "WorkBuddy 客户端里 hy4free 曾有限时免费额度（积分倍率 0，活动期至 2026-11-15），那是积分活动，不是官方 API 按量单价，且额度用完后仍会扣积分。腾讯云混元 Hy4 标准接口另有刊例价，但不能当成 hy4-free 的官方单价。未在官方定价页读到「免费即 0 元/百万 token」的表述，故保持没读到，不把价格写成 0。"
+      },
+      {
+        "id": "hy3",
+        "match": [
+          "hy3",
+          "Hy3"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 1,
+        "output": 4,
+        "cached_read": 0.25,
+        "source": "https://cloud.tencent.com/document/product/1823/130055/",
+        "source_via": "腾讯云 TokenHub「模型价格」页，在线推理后付费（广州）语言模型表（2026-11-12 阅读；该页最近更新时间写的是 2026-11-09 20:21:30）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "官文 Hy3（调用参数 hy3）：推理输入 1 元、推理输出 4 元、缓存命中 0.25 元 / 百万 tokens。用的是后付费在线推理价，不是同页的批量推理价（批量是 0.5 / 2 / 0.125）。WorkBuddy 积分倍率里 Hy3 写限时免费，那是积分规则，不是腾讯云按量单价。本条只匹配模型名 hy3，不把此价套用到 tencent/hy3-preview-20260421。"
+      },
+      {
+        "id": "hy3-preview",
+        "match": [
+          "hy3-preview",
+          "tencent/hy3-preview-20260421",
+          "hy3-preview-20260421"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "https://cloud.tencent.com/document/product/1823/130055/",
+        "source_via": "2026-11-12 阅读腾讯云 TokenHub 模型价格页，该页有 Hy3 正式版后付费价，未见名为 hy3-preview 或 tencent/hy3-preview-20260421 的单独条目。",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "不把 Hy3 正式版价格套用到 preview。保持没读到。"
       },
       {
         "id": "glm-5.3-flashx",
@@ -317,6 +395,24 @@
         "retrieved_at": "2026-11-12",
         "status": "没读到",
         "note": "未从官方页面读到 mimo-v2.5-pro 的按量单价，保持没读到。"
+      },
+      {
+        "id": "minimax-m2.7",
+        "match": [
+          "minimax-m2.7",
+          "MiniMax-M2.7",
+          "MiniMax-M2.7-highspeed"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "https://platform.minimax.cn/docs/pricing/overview",
+        "source_via": "2026-11-12 阅读 MiniMax 官方「定价概览」页（https://platform.minimax.cn/docs/pricing/overview）。该页语言模型表当前列出 MiniMax-M3.1-Flash 与 MiniMax-M3，没有 MiniMax-M2.7。官方模型列表称 M2.5、M2.7 系列将于 2026-11-18 下线，定价页已不再公布其按量单价。",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "今天在官方定价页没读到 MiniMax-M2.7 的按量数字，不能用 M3 的价格或第三方历史报价代替。保持没读到。"
       },
       {
         "id": "volc-ep-endpoints",

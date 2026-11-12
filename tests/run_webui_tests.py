@@ -823,6 +823,85 @@ def test_peak_hours_and_cache_savings():
     cr = report.credit_rules or {}
     check("规则摘要带来源", "workbuddy.cn" in (cr.get("source") or "") and cr.get("exact_formula_status") == NOT_FOUND, str(cr))
 
+    # deepseek-v4-pro：官方页 2026-11-12 再读到的闲时/高峰价
+    pro = lookup_unit_price(prices, "deepseek-v4-pro")
+    check(
+        "deepseek-v4-pro 闲时单价 4.5 / 0.15 / 13.5",
+        pro["status"] == "ok" and pro["input"] == 4.5 and pro["cached_read"] == 0.15 and pro["output"] == 13.5,
+        str(pro),
+    )
+    check(
+        "deepseek-v4-pro 高峰单价 9 / 0.30 / 27",
+        pro.get("peak") and pro["peak"]["input"] == 9 and pro["peak"]["cached_read"] == 0.30 and pro["peak"]["output"] == 27,
+        str(pro.get("peak")),
+    )
+    check("deepseek-v4-pro 来源是 DeepSeek 官方定价页", "api-docs.deepseek.com" in (pro.get("source") or ""), str(pro.get("source")))
+
+    pro_off = official_cost_for_call({
+        "model": "deepseek-v4-pro",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "prompt_tokens": 2_000_000,
+        "timestamp": ms("2026-11-14 10:00:00"),
+    }, prices)
+    check("v4-pro 闲时 1M 三项合计 18.15", pro_off["status"] == "ok" and abs(pro_off["cny"] - 18.15) < 1e-9, str(pro_off))
+    check("v4-pro 闲时缓存命中省 4.35", abs((pro_off.get("cache_hit_saved") or 0) - 4.35) < 1e-9, str(pro_off))
+    check("v4-pro 周末标闲时", pro_off.get("period") == "offpeak", str(pro_off))
+
+    pro_pk = official_cost_for_call({
+        "model": "deepseek-v4-pro",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "prompt_tokens": 2_000_000,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    check("v4-pro 高峰 1M 三项合计 36.30", pro_pk["status"] == "ok" and abs(pro_pk["cny"] - 36.30) < 1e-9, str(pro_pk))
+    check("v4-pro 高峰缓存命中省 8.70", abs((pro_pk.get("cache_hit_saved") or 0) - 8.70) < 1e-9, str(pro_pk))
+    check("v4-pro 工作日上午标高峰", pro_pk.get("period") == "peak", str(pro_pk))
+
+    # 别名 DeepSeek-V4-Pro-0813 应对上同一条
+    alias = official_cost_for_call({
+        "model": "DeepSeek-V4-Pro-0813",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 0,
+        "completion_tokens": 0,
+        "timestamp": ms("2026-11-14 10:00:00"),
+    }, prices)
+    check("V4-Pro-0813 别名按 pro 闲时 4.5", alias["status"] == "ok" and abs(alias["cny"] - 4.5) < 1e-9, str(alias))
+
+    k26 = official_cost_for_call({
+        "model": "kimi-k2.6",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "prompt_tokens": 2_000_000,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    check("kimi-k2.6 标准价 6.5+1.1+27=34.6", k26["status"] == "ok" and abs(k26["cny"] - 34.6) < 1e-9, str(k26))
+    check("kimi-k2.6 缓存命中省 5.4", abs((k26.get("cache_hit_saved") or 0) - 5.4) < 1e-9, str(k26))
+    check("kimi-k2.6 无高峰价，标标准", k26.get("period") == "standard", str(k26))
+
+    hy = official_cost_for_call({
+        "model": "hy3",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "prompt_tokens": 2_000_000,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    check("hy3 在线推理价 1+0.25+4=5.25", hy["status"] == "ok" and abs(hy["cny"] - 5.25) < 1e-9, str(hy))
+    check("hy3 缓存命中省 0.75", abs((hy.get("cache_hit_saved") or 0) - 0.75) < 1e-9, str(hy))
+
+    preview = lookup_unit_price(prices, "tencent/hy3-preview-20260421")
+    check("hy3-preview 不套用正式版价，仍没读到", preview["status"] == NOT_FOUND, str(preview))
+    mm = lookup_unit_price(prices, "minimax-m2.7")
+    check("minimax-m2.7 官方定价页未列出，仍没读到", mm["status"] == NOT_FOUND, str(mm))
+    # 也不能把 k2.6 的价套到 k3-2
+    k32 = lookup_unit_price(prices, "kimi-k3-2")
+    check("kimi-k3-2 仍没读到", k32["status"] == NOT_FOUND, str(k32))
+
 
 def main():
     print("workbuddy 本机网页版测试")
