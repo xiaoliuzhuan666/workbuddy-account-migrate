@@ -3,11 +3,18 @@
 
   const $ = (id) => document.getElementById(id);
   const PAGES = ["accounts", "tokens", "credits", "sessions"];
-  const SERIES = [
-    { key: "cache_hit_tokens", label: "缓存命中", color: "#22c55e", cls: "cache" },
-    { key: "uncached_input", label: "新输入", color: "#2dd4bf", cls: "input" },
-    { key: "completion_tokens", label: "输出", color: "#8b7cf6", cls: "output" },
-  ];
+
+  function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  }
+  function series() {
+    return [
+      { key: "cache_hit_tokens", label: "缓存命中", color: cssVar("--series-cache", "#3B82B0"), cls: "cache" },
+      { key: "uncached_input", label: "新输入", color: cssVar("--series-input", "#1B4F8C"), cls: "input" },
+      { key: "completion_tokens", label: "输出", color: cssVar("--series-output", "#7C6F5A"), cls: "output" },
+    ];
+  }
 
   const state = {
     meta: null,
@@ -22,6 +29,7 @@
     overviewRange: "30d",
     chartRange: "30d",
     openSession: "",
+    openModel: "",
   };
 
   function fmt(n, d) {
@@ -43,8 +51,15 @@
     return fmt(x, x % 1 === 0 ? 0 : 2);
   }
   function pct(n) {
-    if (n === null || n === undefined) return "没读到";
+    if (n === null || n === undefined) return null;
     return (Number(n) * 100).toFixed(1) + "%";
+  }
+  function na(text) {
+    return '<span class="na">' + escapeHtml(text == null ? "没读到" : text) + "</span>";
+  }
+  function shown(value, formatted) {
+    if (value === null || value === undefined || value === "没读到" || formatted === "没读到") return na("没读到");
+    return escapeHtml(formatted != null ? String(formatted) : String(value));
   }
   function when(ms) {
     if (!ms) return "—";
@@ -84,7 +99,7 @@
     if (range === "7d") return day >= shiftDay(today, -6) && day <= today;
     if (range === "30d") return day >= shiftDay(today, -29) && day <= today;
     if (range === "month") return day.slice(0, 7) === today.slice(0, 7);
-    return true; // all
+    return true;
   }
   function sumDays(days) {
     const out = {
@@ -98,6 +113,31 @@
     out.cache_hit_rate = prompt ? Math.min(out.cache_hit_tokens, prompt) / prompt : null;
     out.total_tokens = out.total_tokens || (out.prompt_tokens + out.completion_tokens);
     return out;
+  }
+  function emptyRow(cols, title, desc) {
+    return (
+      '<tr><td colspan="' + cols + '" class="empty-state">' +
+      (title ? '<p class="empty-title">' + escapeHtml(title) + "</p>" : "") +
+      '<p class="empty-desc">' + escapeHtml(desc) + "</p></td></tr>"
+    );
+  }
+  function shortSource(entry) {
+    const raw = entry.source_via || entry.source || "";
+    const hrefCand = (entry.source && /^https?:\/\//.test(entry.source)) ? entry.source
+      : (/^https?:\/\//.test(raw) ? raw : "");
+    let text = raw;
+    if (/ModelLink/i.test(raw)) text = "ModelLink";
+    else if (/^https?:\/\//.test(raw)) {
+      try {
+        text = new URL(raw).hostname.replace(/^www\./, "");
+      } catch (e) {
+        text = raw;
+      }
+    } else if (raw) {
+      text = raw.split(/[，,（(]/)[0].trim() || raw;
+    }
+    if (text.length > 24) text = text.slice(0, 22) + "…";
+    return { text: text || "—", href: hrefCand || "", detail: raw, date: entry.retrieved_at || "" };
   }
 
   async function get(path) {
@@ -116,6 +156,37 @@
     if (extra) Object.keys(extra).forEach((k) => { if (extra[k]) p.set(k, extra[k]); });
     const s = p.toString();
     return s ? "?" + s : "";
+  }
+
+  /* ---------- 外观 ---------- */
+  function resolvedTheme() {
+    const explicit = document.documentElement.getAttribute("data-theme");
+    if (explicit === "light" || explicit === "dark") return explicit;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function syncThemeButtons() {
+    const t = resolvedTheme();
+    const light = $("theme-light");
+    const dark = $("theme-dark");
+    if (light) light.classList.toggle("is-on", t === "light");
+    if (dark) dark.classList.toggle("is-on", t === "dark");
+    if (light) light.setAttribute("aria-pressed", t === "light" ? "true" : "false");
+    if (dark) dark.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+  }
+  function setTheme(theme) {
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+      try { localStorage.setItem("wb-theme", theme); } catch (e) {}
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+      try { localStorage.removeItem("wb-theme"); } catch (e) {}
+    }
+    syncThemeButtons();
+    if (state.usage && state.page === "tokens") renderTokenPage();
+    else if (state.usage) {
+      const svg = $("trend-chart");
+      if (svg && svg.childNodes.length) renderTokenPage();
+    }
   }
 
   /* ---------- 路由 ---------- */
@@ -137,6 +208,9 @@
     if (!opts || !opts.silent) {
       const want = "#/" + name;
       if (location.hash !== want) history.replaceState(null, "", want);
+    }
+    if (name === "tokens" && state.usage) {
+      requestAnimationFrame(() => renderTokenPage());
     }
   }
   window.addEventListener("hashchange", () => showPage(currentHashPage(), { silent: true }));
@@ -214,7 +288,9 @@
     $("account-count").textContent = String(state.accounts.length);
     const grid = $("account-grid");
     if (!state.accounts.length) {
-      grid.innerHTML = '<p class="empty">这个数据目录里还没有读到账号。</p>';
+      grid.innerHTML =
+        '<div class="card empty-state"><p class="empty-title">还没有账号</p>' +
+        '<p class="empty-desc">这个数据目录里还没有读到账号。</p></div>';
       return;
     }
     grid.innerHTML = state.accounts
@@ -360,13 +436,16 @@
   function fillStats(usage) {
     const t = usage.totals || {};
     const items = [
-      ["已消耗积分", fmt(t.credit, 2), "spark"],
-      ["套餐折算", t.estimated_cny == null ? "没读到" : "¥ " + fmt(t.estimated_cny, 2), "yen"],
-      ["API 等效", t.equivalent_cny == null ? "没读到" : "¥ " + fmt(t.equivalent_cny, 2), "trend"],
-      ["缓存命中率", pct(t.cache_hit_rate), "cache"],
+      ["已消耗积分", t.credit != null, fmt(t.credit, 2)],
+      ["套餐折算", t.estimated_cny != null, t.estimated_cny == null ? "没读到" : "¥ " + fmt(t.estimated_cny, 2)],
+      ["API 等效", t.equivalent_cny != null, t.equivalent_cny == null ? "没读到" : "¥ " + fmt(t.equivalent_cny, 2)],
+      ["缓存命中率", t.cache_hit_rate != null, pct(t.cache_hit_rate) || "没读到"],
     ];
     $("stats").innerHTML = items
-      .map(([l, n]) => '<div class="metric"><div class="k">' + escapeHtml(l) + '</div><div class="v">' + escapeHtml(n) + "</div></div>")
+      .map(([l, ok, n]) =>
+        '<div class="metric"><div class="k">' + escapeHtml(l) + '</div><div class="v">' +
+        (ok ? escapeHtml(n) : na("没读到")) + "</div></div>"
+      )
       .join("");
   }
 
@@ -374,7 +453,7 @@
     const tb = $("infer-table").querySelector("tbody");
     const rows = usage.by_model || [];
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">这个数据目录里还没有读到 rawUsage。</td></tr>';
+      tb.innerHTML = emptyRow(7, "还没有反推结果", "这个数据目录里还没有读到 rawUsage。");
       return;
     }
     tb.innerHTML = rows
@@ -382,17 +461,20 @@
         const inf = r.inference || {};
         const ok = inf.status === "ok" && inf.tokens_per_credit;
         const tpc = ok ? inf.tokens_per_credit : null;
-        const cell = (k) => (!tpc || tpc[k] == null ? "没读到" : fmt(tpc[k], 0));
-        const status = inf.status === "ok" ? "已反推" : "没读到";
+        const cell = (k) => (!tpc || tpc[k] == null ? na("没读到") : escapeHtml(fmt(tpc[k], 0)));
+        const status = ok
+          ? '<span class="status-pill is-ok">已反推</span>'
+          : '<span class="status-pill is-miss">没读到</span>';
         return (
           "<tr>" +
-          "<td>" + escapeHtml(r.model) + "</td>" +
+          "<td class='clip' title='" + escapeHtml(r.model) + "'>" + escapeHtml(r.model) + "</td>" +
           '<td class="num">' + fmt(inf.calls != null ? inf.calls : r.calls, 0) + "</td>" +
-          "<td>" + escapeHtml(status) + "</td>" +
-          '<td class="num">' + escapeHtml(cell("uncached_input")) + "</td>" +
-          '<td class="num">' + escapeHtml(cell("cache_hit")) + "</td>" +
-          '<td class="num">' + escapeHtml(cell("output")) + "</td>" +
-          "<td>" + escapeHtml(inf.reason || (ok ? "三项分开计算，未使用默认汇率。" : "")) + "</td>" +
+          "<td>" + status + "</td>" +
+          '<td class="num">' + cell("uncached_input") + "</td>" +
+          '<td class="num">' + cell("cache_hit") + "</td>" +
+          '<td class="num">' + cell("output") + "</td>" +
+          "<td class='note' title='" + escapeHtml(inf.reason || "") + "'>" +
+            escapeHtml(inf.reason || (ok ? "三项分开计算，未使用默认汇率。" : "")) + "</td>" +
           "</tr>"
         );
       })
@@ -403,49 +485,83 @@
     const tb = $("model-table").querySelector("tbody");
     const rows = usage.by_model || [];
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="14" class="empty">这个数据目录里还没有读到 rawUsage。</td></tr>';
+      tb.innerHTML = emptyRow(6, "还没有用量", "这个数据目录里还没有读到 rawUsage。");
+      const bar = $("cross-check-bar");
+      if (bar) bar.hidden = true;
       return;
     }
     tb.innerHTML = rows
       .map((r) => {
         const mul =
           r.official_multiplier_status === "没读到" || r.official_multiplier == null
-            ? "没读到"
+            ? null
             : "x" + r.official_multiplier;
         const cny =
           r.estimated_cny_status === "没读到" || r.estimated_cny == null
-            ? "没读到"
+            ? null
             : "¥ " + fmt(r.estimated_cny, 2);
         const inf = r.inference || {};
         const tpc = (inf.status === "ok" && inf.tokens_per_credit) ? inf.tokens_per_credit : null;
         const cellInf = (k) => {
-          if (!tpc || tpc[k] == null) return "没读到";
-          return fmt(tpc[k], 0);
+          if (!tpc || tpc[k] == null) return na("没读到");
+          return escapeHtml(fmt(tpc[k], 0));
         };
         const eq = (r.equivalent_cny_status === "没读到" || r.equivalent_cny == null)
-          ? "没读到" : "¥ " + fmt(r.equivalent_cny, 2);
+          ? null : "¥ " + fmt(r.equivalent_cny, 2);
+        const hit = pct(r.cache_hit_rate);
+        const open = state.openModel === r.model;
+        const detail =
+          "<tr class='model-detail' data-for='" + escapeHtml(r.model) + "'" + (open ? "" : " hidden") + ">" +
+          "<td colspan='6'><div class='detail-grid'>" +
+          "<div><div class='k'>输入 token</div><div class='v'>" + escapeHtml(fmt(r.prompt_tokens, 0)) + "</div></div>" +
+          "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(r.completion_tokens, 0)) + "</div></div>" +
+          "<div><div class='k'>思考 token</div><div class='v'>" + escapeHtml(fmt(r.thinking_tokens, 0)) + "</div></div>" +
+          "<div><div class='k'>去缓存效率</div><div class='v'>" +
+            (r.tokens_per_credit_uncached == null ? na("没读到") : escapeHtml(fmt(r.tokens_per_credit_uncached, 0))) +
+          "</div></div>" +
+          "<div><div class='k'>每积分·未命中</div><div class='v'>" + cellInf("uncached_input") + "</div></div>" +
+          "<div><div class='k'>每积分·缓存</div><div class='v'>" + cellInf("cache_hit") + "</div></div>" +
+          "<div><div class='k'>每积分·输出</div><div class='v'>" + cellInf("output") + "</div></div>" +
+          "<div><div class='k'>官方倍率</div><div class='v'>" + (mul == null ? na("没读到") : escapeHtml(mul)) + "</div></div>" +
+          "</div></td></tr>";
         return (
-          "<tr>" +
-          "<td>" + escapeHtml(r.model) + "</td>" +
+          "<tr class='model-row" + (open ? " is-open" : "") + "' data-model='" + escapeHtml(r.model) + "'>" +
+          "<td class='clip' title='" + escapeHtml(r.model) + "'>" + escapeHtml(r.model) + "</td>" +
           '<td class="num">' + fmt(r.calls, 0) + "</td>" +
-          '<td class="num">' + fmt(r.prompt_tokens, 0) + "</td>" +
-          '<td class="num">' + fmt(r.completion_tokens, 0) + "</td>" +
-          '<td class="num">' + fmt(r.thinking_tokens, 0) + "</td>" +
-          '<td class="num">' + pct(r.cache_hit_rate) + "</td>" +
-          '<td class="num">' + (r.tokens_per_credit_uncached == null ? "没读到" : fmt(r.tokens_per_credit_uncached, 0)) + "</td>" +
           '<td class="num">' + fmt(r.credit, 2) + "</td>" +
-          '<td class="num">' + escapeHtml(cny) + "</td>" +
-          '<td class="num">' + escapeHtml(eq) + "</td>" +
-          '<td class="num">' + escapeHtml(cellInf("uncached_input")) + "</td>" +
-          '<td class="num">' + escapeHtml(cellInf("cache_hit")) + "</td>" +
-          '<td class="num">' + escapeHtml(cellInf("output")) + "</td>" +
-          "<td>" + escapeHtml(mul) + "</td>" +
-          "</tr>"
+          '<td class="num">' + (cny == null ? na("没读到") : escapeHtml(cny)) + "</td>" +
+          '<td class="num">' + (eq == null ? na("没读到") : escapeHtml(eq)) + "</td>" +
+          '<td class="num">' + (hit == null ? na("没读到") : escapeHtml(hit)) + "</td>" +
+          "</tr>" +
+          detail
         );
       })
       .join("");
+    tb.querySelectorAll("tr.model-row").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        const id = tr.getAttribute("data-model");
+        state.openModel = state.openModel === id ? "" : id;
+        fillModels(state.usage || {});
+      });
+    });
     const cc = usage.cross_check || {};
-    $("cross-check").textContent = cc.summary || "";
+    const bar = $("cross-check-bar");
+    const text = $("cross-check");
+    const cdot = $("cross-check-dot");
+    if (bar && text) {
+      if (cc.summary) {
+        bar.hidden = false;
+        text.textContent = cc.summary;
+        if (cdot) {
+          const ok = /一致|通过|吻合/.test(cc.summary) && !/不一致|失败|差异/.test(cc.summary);
+          const bad = /不一致|失败/.test(cc.summary);
+          cdot.className = "dot " + (ok ? "is-on" : bad ? "is-warn" : "is-off");
+        }
+      } else {
+        bar.hidden = true;
+        text.textContent = "";
+      }
+    }
   }
 
   function fillPrices(usage) {
@@ -454,17 +570,23 @@
     const tb = document.querySelector("#price-table tbody");
     if (tb) {
       if (!prices.length) {
-        tb.innerHTML = '<tr><td colspan="6" class="empty">价格表里还没有按量单价。</td></tr>';
+        tb.innerHTML = emptyRow(5, "还没有单价", "价格表里还没有按量单价。");
       } else {
         tb.innerHTML = prices.map((e) => {
           const miss = e.status === "没读到";
-          const cell = (k) => (miss || e[k] == null || e[k] === "没读到") ? "没读到" : fmt(e[k], 4);
-          return "<tr><td>" + escapeHtml(e.id || "") + "</td>" +
+          const cell = (k) => (miss || e[k] == null || e[k] === "没读到") ? na("没读到") : escapeHtml(fmt(e[k], 4));
+          const src = shortSource(e);
+          const tip = src.detail || src.text;
+          const srcHtml = src.href
+            ? '<a href="' + escapeHtml(src.href) + '" target="_blank" rel="noopener noreferrer" title="' +
+              escapeHtml(tip) + '">' + escapeHtml(src.text) + "</a>"
+            : '<span title="' + escapeHtml(tip) + '">' + escapeHtml(src.text) + "</span>";
+          const dateHtml = src.date ? '<span class="when">' + escapeHtml(src.date) + "</span>" : "";
+          return "<tr><td class='clip' title='" + escapeHtml(e.id || "") + "'>" + escapeHtml(e.id || "") + "</td>" +
             '<td class="num">' + cell("input") + "</td>" +
             '<td class="num">' + cell("output") + "</td>" +
             '<td class="num">' + cell("cached_read") + "</td>" +
-            "<td>" + escapeHtml(e.source_via || e.source || "") + "</td>" +
-            "<td>" + escapeHtml(e.retrieved_at || "") + "</td></tr>";
+            "<td class='src'>" + srcHtml + dateHtml + "</td></tr>";
         }).join("");
       }
     }
@@ -474,16 +596,17 @@
     const names = Object.keys(models);
     if (atb) {
       if (!names.length) {
-        atb.innerHTML = '<tr><td colspan="4" class="empty">没有已核对的 AFP 系数。</td></tr>';
+        atb.innerHTML = emptyRow(4, "还没有系数", "没有已核对的 AFP 系数。");
       } else {
         atb.innerHTML = names.map((n) => {
           const m = models[n] || {};
           const miss = m.status === "没读到";
-          const note = (m.limited_offer ? "限时折扣 " : "") + (m.note || "");
-          return "<tr><td>" + escapeHtml(n) + "</td>" +
-            '<td class="num">' + (miss || m.input_coef == null ? "没读到" : m.input_coef) + "</td>" +
-            '<td class="num">' + (miss || m.output_coef == null ? "没读到" : m.output_coef) + "</td>" +
-            "<td>" + escapeHtml(note) + "</td></tr>";
+          const noteRaw = m.note || "";
+          const note = ((m.limited_offer && noteRaw.indexOf("限时折扣") < 0) ? "限时折扣 " : "") + noteRaw;
+          return "<tr><td class='clip' title='" + escapeHtml(n) + "'>" + escapeHtml(n) + "</td>" +
+            '<td class="num">' + (miss || m.input_coef == null ? na("没读到") : escapeHtml(String(m.input_coef))) + "</td>" +
+            '<td class="num">' + (miss || m.output_coef == null ? na("没读到") : escapeHtml(String(m.output_coef))) + "</td>" +
+            "<td class='note' title='" + escapeHtml(note) + "'>" + escapeHtml(note) + "</td></tr>";
         }).join("");
       }
     }
@@ -573,14 +696,15 @@
     const daysOverview = daysAll.filter((d) => inRange(d.day, state.overviewRange));
     const useTotals = state.overviewRange === "all" || !daysAll.length;
     const totals = useTotals ? (bundle.totals || {}) : sumDays(daysOverview);
+    const SERIES = series();
 
     if (bundle.status === "没读到" && state.tokenSource === "codebuddy") {
       $("comp-bar").innerHTML = "";
       $("comp-legend").innerHTML = "";
       $("token-metrics").innerHTML =
-        '<div class="metric span-all"><div class="k">CodeBuddy CLI</div>' +
-        '<div class="v msg">' +
-        escapeHtml(bundle.reason || "没读到") + "</div></div>";
+        '<div class="metric span-all"><div class="empty-state">' +
+        '<p class="empty-title">没读到 CodeBuddy CLI</p>' +
+        '<p class="empty-desc">' + escapeHtml(bundle.reason || "没读到") + "</p></div></div>";
       renderChart([]);
       return;
     }
@@ -606,9 +730,9 @@
     }
     $("comp-legend").innerHTML = parts
       .map((p) => {
-        const share = sum ? ((p.value / sum) * 100).toFixed(1) + "%" : "没读到";
+        const share = sum ? ((p.value / sum) * 100).toFixed(1) + "%" : null;
         return '<span><i class="swatch swatch-' + p.cls + '"></i>' +
-          escapeHtml(p.label) + " " + share + "</span>";
+          escapeHtml(p.label) + " " + (share == null ? na("没读到") : escapeHtml(share)) + "</span>";
       })
       .join("");
 
@@ -617,14 +741,18 @@
     const hit = totals.cache_hit_rate != null
       ? totals.cache_hit_rate
       : (inputTok ? Math.min(totals.cache_hit_tokens || 0, inputTok) / inputTok : null);
+    const hitText = pct(hit);
     const metrics = [
-      ["总 Token", compact(totalTok)],
-      ["输入 Token", compact(inputTok)],
-      ["输出 Token", compact(totals.completion_tokens)],
-      ["缓存命中率", pct(hit)],
+      ["总 Token", compact(totalTok), totalTok != null && isFinite(Number(totalTok))],
+      ["输入 Token", compact(inputTok), inputTok != null && isFinite(Number(inputTok))],
+      ["输出 Token", compact(totals.completion_tokens), totals.completion_tokens != null],
+      ["缓存命中率", hitText || "没读到", hitText != null],
     ];
     $("token-metrics").innerHTML = metrics
-      .map(([l, n]) => '<div class="metric"><div class="k">' + escapeHtml(l) + '</div><div class="v">' + escapeHtml(n) + "</div></div>")
+      .map(([l, n, ok]) =>
+        '<div class="metric"><div class="k">' + escapeHtml(l) + '</div><div class="v">' +
+        (ok ? escapeHtml(n) : na("没读到")) + "</div></div>"
+      )
       .join("");
 
     const chartDays = daysAll.filter((d) => inRange(d.day, state.chartRange));
@@ -644,6 +772,11 @@
     const empty = $("chart-empty");
     const tip = $("chart-tip");
     const legend = $("chart-legend");
+    const SERIES = series();
+    const axis = cssVar("--chart-axis", "#94A3B8");
+    const gridC = cssVar("--chart-grid", "#E2E8F0");
+    const surface = cssVar("--surface", "#FFFFFF");
+    const callsC = cssVar("--series-calls", "#94A3B8");
     legend.innerHTML =
       SERIES.map((s) => '<span><i class="swatch swatch-' + s.cls + '"></i>' + escapeHtml(s.label) + "</span>").join("") +
       '<span><i class="swatch swatch-calls"></i>调用次数</span>';
@@ -651,7 +784,7 @@
     if (!days || !days.length) {
       svg.innerHTML = "";
       empty.hidden = false;
-      empty.textContent = "没读到该时间段的按日用量。";
+      empty.innerHTML = '<p class="empty-title">没读到按日用量</p><p class="empty-desc">该时间段没有按日的用量数据。</p>';
       tip.hidden = true;
       return;
     }
@@ -660,7 +793,7 @@
     const box = $("chart-box");
     const W = Math.max(box.clientWidth || 720, 480);
     const H = Math.max(box.clientHeight || 300, 240);
-    const pad = { l: 52, r: 48, t: 10, b: 36 };
+    const pad = { l: 56, r: 48, t: 10, b: 36 };
     const innerW = W - pad.l - pad.r;
     const innerH = H - pad.t - pad.b;
     const maxTok = niceMax(Math.max(0, ...days.map((d) =>
@@ -681,15 +814,17 @@
       const y = yTok(v);
       grid +=
         '<line x1="' + pad.l + '" x2="' + (W - pad.r) + '" y1="' + y + '" y2="' + y +
-        '" stroke="#eee" stroke-width="1"/>' +
-        '<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="#a1a1aa" font-size="11">' +
+        '" stroke="' + gridC + '" stroke-width="1"/>' +
+        '<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="' + axis +
+        '" font-size="11" font-family="ui-monospace, monospace">' +
         escapeHtml(compact(v)) + "</text>";
     }
     for (let i = 0; i <= ticks; i++) {
       const v = maxCalls * (i / ticks);
       const y = yCall(v);
       grid +=
-        '<text x="' + (W - pad.r + 8) + '" y="' + (y + 4) + '" text-anchor="start" fill="#a1a1aa" font-size="11">' +
+        '<text x="' + (W - pad.r + 8) + '" y="' + (y + 4) + '" text-anchor="start" fill="' + axis +
+        '" font-size="11" font-family="ui-monospace, monospace">' +
         escapeHtml(String(Math.round(v))) + "</text>";
     }
 
@@ -707,13 +842,12 @@
       segs.forEach((seg, si) => {
         y -= seg.h;
         const top = si === segs.length - 1;
-        const rx = top ? Math.min(4, bw / 2) : 0;
+        const rx = top ? Math.min(3, bw / 2) : 0;
         bars +=
           '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
           '" height="' + Math.max(seg.h, 0.5).toFixed(1) + '" fill="' + seg.s.color +
           '" rx="' + rx + '" ry="' + rx + '" data-i="' + i + '"/>';
         if (top && rx) {
-          // 只圆顶部：用一个不圆的矩形盖住下半圆角
           const cover = Math.min(rx + 0.5, Math.max(seg.h - 0.5, 0));
           if (cover > 0 && seg.h > rx) {
             bars +=
@@ -728,18 +862,20 @@
       const label = (d.day || "").slice(5);
       if (n <= 16 || i % Math.ceil(n / 12) === 0 || i === n - 1) {
         bars +=
-          '<text x="' + cx.toFixed(1) + '" y="' + (H - 12) + '" text-anchor="middle" fill="#a1a1aa" font-size="11">' +
+          '<text x="' + cx.toFixed(1) + '" y="' + (H - 12) + '" text-anchor="middle" fill="' + axis +
+          '" font-size="11">' +
           escapeHtml(label) + "</text>";
       }
     });
 
     const line =
-      '<polyline fill="none" stroke="#64748b" stroke-width="1.6" stroke-dasharray="4 3" points="' +
+      '<polyline fill="none" stroke="' + callsC + '" stroke-width="1.6" stroke-dasharray="4 3" points="' +
       pts.join(" ") + '"/>' +
       pts
         .map((p) => {
           const [cx, cy] = p.split(",");
-          return '<circle cx="' + cx + '" cy="' + cy + '" r="2.2" fill="#fff" stroke="#64748b" stroke-width="1.4"/>';
+          return '<circle cx="' + cx + '" cy="' + cy + '" r="2.2" fill="' + surface +
+            '" stroke="' + callsC + '" stroke-width="1.4"/>';
         })
         .join("");
 
@@ -789,6 +925,16 @@
     renderSessions();
   }
 
+  function modelTags(models) {
+    if (!models) return '<span class="na">—</span>';
+    return models
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean)
+      .map((m) => '<span class="tag" title="' + escapeHtml(m) + '">' + escapeHtml(m) + "</span>")
+      .join("");
+  }
+
   function renderSessions() {
     const q = ($("session-filter").value || "").trim().toLowerCase();
     const rows = state.sessions.filter((s) => {
@@ -798,14 +944,16 @@
     });
     const tb = $("session-table").querySelector("tbody");
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="8" class="empty">没有符合条件的会话。</td></tr>';
+      const emptyTitle = q ? "没有符合条件的会话" : "还没有会话";
+      const emptyDesc = q ? "试试别的标题、模型或账号。" : "这个数据目录里还没有读到会话。";
+      tb.innerHTML = emptyRow(8, emptyTitle, emptyDesc);
       $("session-page").textContent = "0 条";
       return;
     }
     tb.innerHTML = rows
       .map((s) => {
         const u = s.usage || {};
-        const hit = u.prompt_tokens ? pct(u.cache_hit_tokens / u.prompt_tokens) : "—";
+        const hit = u.prompt_tokens ? pct(u.cache_hit_tokens / u.prompt_tokens) : null;
         const models = u.model_counts ? Object.keys(u.model_counts).join(", ") : s.model;
         const open = state.openSession === s.id;
         const detail =
@@ -824,14 +972,14 @@
           "</td></tr>";
         return (
           "<tr class='session-row" + (open ? " is-open" : "") + "' data-id='" + escapeHtml(s.id) + "'>" +
-          "<td>" + escapeHtml(s.title || "（无标题）") + "</td>" +
-          "<td>" + escapeHtml(models || "—") + "</td>" +
-          "<td>" + escapeHtml(s.display_id || "—") + "</td>" +
+          "<td class='clip' title='" + escapeHtml(s.title || "（无标题）") + "'>" + escapeHtml(s.title || "（无标题）") + "</td>" +
+          "<td>" + modelTags(models) + "</td>" +
+          "<td class='clip' title='" + escapeHtml(s.display_id || "—") + "'>" + escapeHtml(s.display_id || "—") + "</td>" +
           '<td class="num">' + fmt(u.calls || 0, 0) + "</td>" +
           '<td class="num">' + fmt(u.credit || 0, 2) + "</td>" +
           '<td class="num">' + fmt(u.prompt_tokens || 0, 0) + " / " + fmt(u.completion_tokens || 0, 0) + "</td>" +
-          '<td class="num">' + escapeHtml(hit) + "</td>" +
-          "<td>" + escapeHtml(when(s.updated_at || s.last_activity_at)) + "</td>" +
+          '<td class="num">' + (hit == null ? "—" : escapeHtml(hit)) + "</td>" +
+          "<td class='date'>" + escapeHtml(when(s.updated_at || s.last_activity_at)) + "</td>" +
           "</tr>" +
           detail
         );
@@ -849,6 +997,8 @@
 
   /* ---------- 加载 ---------- */
   async function reload() {
+    const first = !state.usage;
+    if (first) document.body.setAttribute("aria-busy", "true");
     try {
       const meta = await get("/api/meta" + qed());
       fillMeta(meta);
@@ -881,6 +1031,8 @@
     } catch (e) {
       $("token-updated").textContent = "读取失败：" + e.message;
       $("client-status").textContent = "读取失败";
+    } finally {
+      document.body.removeAttribute("aria-busy");
     }
   }
 
@@ -914,6 +1066,22 @@
   window.addEventListener("resize", () => {
     if (state.page === "tokens") renderTokenPage();
   });
+
+  document.querySelectorAll("[data-theme-set]").forEach((btn) => {
+    btn.addEventListener("click", () => setTheme(btn.getAttribute("data-theme-set")));
+  });
+  try {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (!document.documentElement.getAttribute("data-theme")) {
+        syncThemeButtons();
+        if (state.usage) renderTokenPage();
+      }
+    };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  } catch (e) {}
+  syncThemeButtons();
 
   showPage(currentHashPage(), { silent: true });
   reload();

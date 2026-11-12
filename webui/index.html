@@ -4,7 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
   <title>WorkBuddy 本机看板</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("wb-theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -12,11 +21,11 @@
     <aside class="sidebar" aria-label="侧栏">
       <div class="brand">
         <div class="logo" aria-hidden="true">
-          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-            <rect width="36" height="36" rx="10" fill="#22c55e"/>
-            <path d="M11 22.5c2.2 2.6 4.6 3.9 7 3.9s4.8-1.3 7-3.9" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="14" cy="15.5" r="1.7" fill="#fff"/>
-            <circle cx="22" cy="15.5" r="1.7" fill="#fff"/>
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="8" fill="currentColor"/>
+            <rect x="8" y="16" width="4" height="8" rx="1" fill="var(--sapphire-fg)"/>
+            <rect x="14" y="11" width="4" height="13" rx="1" fill="var(--sapphire-fg)"/>
+            <rect x="20" y="8" width="4" height="16" rx="1" fill="var(--sapphire-fg)"/>
           </svg>
         </div>
         <div class="brand-text">
@@ -31,11 +40,11 @@
           账号同步
         </a>
         <a href="#/tokens" data-page="tokens" class="nav-item">
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V9m6 10V5m6 14v-8m6 8V7"/></svg>
           Token 统计
         </a>
         <a href="#/credits" data-page="credits" class="nav-item">
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2z"/></svg>
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/></svg>
           积分与价格
         </a>
         <a href="#/sessions" data-page="sessions" class="nav-item">
@@ -45,6 +54,10 @@
       </nav>
 
       <div class="sidebar-foot">
+        <div class="theme-switch" role="group" aria-label="外观">
+          <button type="button" data-theme-set="light" id="theme-light">浅色</button>
+          <button type="button" data-theme-set="dark" id="theme-dark">深色</button>
+        </div>
         <div class="client-row">
           <span class="dot" id="client-dot" aria-hidden="true"></span>
           <span class="client-label" id="client-status">客户端：检测中…</span>
@@ -61,19 +74,16 @@
         <header class="page-head">
           <div>
             <h1>账号同步</h1>
-            <p>查看本机账号与会话概况，并把源账号的会话、记忆和连接器合并到目标账号。</p>
+            <p class="lede">查看本机账号，并把源账号的会话、记忆和连接器合并到目标账号。</p>
           </div>
         </header>
 
-        <div class="action-bar">
-          <div class="action-bar-copy">
-            <h2>添加与迁移</h2>
-            <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。不会改登录态，也不支持 OAuth 扫码或切号。</p>
-          </div>
-        </div>
-
         <div class="card sync-card">
           <div id="sync-preflight" class="preflight">正在检查客户端状态…</div>
+          <details class="sync-more">
+            <summary>同步说明</summary>
+            <p>调用仓库已有的迁移逻辑，先备份再合并。必须先退出 WorkBuddy 客户端。必须同时提供本机令牌、勾选确认并输入「确认同步」。不会改登录态，也不支持 OAuth 扫码或切号。</p>
+          </details>
           <div class="sync-grid">
             <label>源账号
               <select id="sync-source"></select>
@@ -102,7 +112,18 @@
         <div class="section-head">
           <h2>账号 <span class="count-pill" id="account-count">0</span></h2>
         </div>
-        <div class="account-grid" id="account-grid"></div>
+        <div class="account-grid" id="account-grid">
+          <article class="account-card skel-card" aria-hidden="true">
+            <div class="skel skel-line w-40"></div>
+            <div class="skel skel-line w-24"></div>
+            <div class="skel skel-num"></div>
+          </article>
+          <article class="account-card skel-card" aria-hidden="true">
+            <div class="skel skel-line w-40"></div>
+            <div class="skel skel-line w-24"></div>
+            <div class="skel skel-num"></div>
+          </article>
+        </div>
       </section>
 
       <!-- Token 统计 -->
@@ -110,14 +131,13 @@
         <header class="page-head">
           <div>
             <h1>Token 统计</h1>
-            <p id="token-updated">正在读取本机用量…</p>
+            <p class="lede" id="token-updated">正在读取本机用量…</p>
           </div>
           <button type="button" class="btn-ghost" id="reload-tokens">刷新统计</button>
         </header>
 
         <div class="tabs" id="token-tabs" role="tablist" aria-label="用量来源"></div>
 
-        <h2 class="block-title">Token 总览</h2>
         <div class="card overview-card">
           <div class="overview-top">
             <div class="comp-wrap">
@@ -131,13 +151,19 @@
               <button type="button" data-range="all">总计</button>
             </div>
           </div>
-          <div class="metric-row" id="token-metrics"></div>
+        </div>
+
+        <div class="metric-row" id="token-metrics">
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
         </div>
 
         <h2 class="block-title">Token 与调用趋势</h2>
         <div class="card chart-card">
           <div class="chart-head">
-            <p class="chart-note">彩色堆叠柱表示每日 Token 构成，虚线表示调用次数。没有按日数据时写「没读到」。</p>
+            <p class="chart-note">堆叠柱是每日 Token 构成，虚线是调用次数。</p>
             <div class="pills" id="chart-range" data-target="chart">
               <button type="button" data-range="30d" class="is-on">近 30 天</button>
               <button type="button" data-range="today">今日</button>
@@ -148,7 +174,7 @@
           <div class="chart-legend" id="chart-legend"></div>
           <div class="chart-box" id="chart-box">
             <svg id="trend-chart" role="img" aria-label="每日 Token 趋势"></svg>
-            <div class="chart-empty" id="chart-empty" hidden>没读到按日的用量数据。</div>
+            <div class="chart-empty" id="chart-empty" hidden>没读到该时间段的按日用量。</div>
             <div class="chart-tip" id="chart-tip" hidden></div>
           </div>
         </div>
@@ -159,7 +185,7 @@
         <header class="page-head">
           <div>
             <h1>积分与价格</h1>
-            <p>积分换 token 只从本机 jsonl 三项反推，不用 5 万默认值。价格来自可编辑的配置，没核实到的格子写「没读到」。</p>
+            <p class="lede">积分换 token 只从本机 jsonl 三项反推。价格来自可编辑配置，没核实到的格子写「没读到」。</p>
           </div>
           <div class="controls">
             <label class="inline">积分折算
@@ -169,14 +195,19 @@
           </div>
         </header>
 
-        <div class="card overview-card">
-          <div class="metric-row" id="stats"></div>
+        <div class="metric-row" id="stats">
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
+          <div class="metric skel-card" aria-hidden="true"><div class="skel skel-line w-40"></div><div class="skel skel-num"></div></div>
         </div>
-        <p class="footnote" id="rate-note"></p>
+        <details class="caliber" id="rate-note-wrap">
+          <summary>估价口径</summary>
+          <p id="rate-note"></p>
+        </details>
 
         <h2 class="block-title">积分换 token（本机反推）</h2>
         <div class="card">
-          <p class="footnote tight">拟合 credit = a×未命中输入 + b×缓存命中 + c×输出。样本不足或不可靠时三项都标「没读到」，不会回退到社区插件的默认汇率。</p>
           <div class="table-wrap">
             <table id="infer-table">
               <thead>
@@ -203,24 +234,19 @@
                 <tr>
                   <th>模型</th>
                   <th class="num">调用</th>
-                  <th class="num">输入 token</th>
-                  <th class="num">输出 token</th>
-                  <th class="num">思考 token</th>
-                  <th class="num">缓存命中率</th>
-                  <th class="num">去缓存效率</th>
                   <th class="num">实际积分</th>
                   <th class="num">套餐折算</th>
                   <th class="num">API 等效</th>
-                  <th class="num">每积分·未命中</th>
-                  <th class="num">每积分·缓存</th>
-                  <th class="num">每积分·输出</th>
-                  <th>官方倍率</th>
+                  <th class="num">缓存命中率</th>
                 </tr>
               </thead>
               <tbody></tbody>
             </table>
           </div>
-          <p class="footnote" id="cross-check"></p>
+          <div class="statusbar" id="cross-check-bar" hidden>
+            <span class="dot" id="cross-check-dot" aria-hidden="true"></span>
+            <span id="cross-check"></span>
+          </div>
         </div>
 
         <section id="prices-panel">
@@ -229,7 +255,7 @@
             <div class="card">
               <h3 class="sub">按量单价（元 / 百万 token）</h3>
               <div class="table-wrap"><table id="price-table">
-                <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th><th>日期</th></tr></thead>
+                <thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th>来源</th></tr></thead>
                 <tbody></tbody>
               </table></div>
             </div>
@@ -239,7 +265,10 @@
                 <thead><tr><th>模型</th><th class="num">输入系数</th><th class="num">输出系数</th><th>说明</th></tr></thead>
                 <tbody></tbody>
               </table></div>
-              <p class="footnote" id="afp-formula"></p>
+              <details class="caliber">
+                <summary>AFP 公式与来源</summary>
+                <p id="afp-formula"></p>
+              </details>
             </div>
           </div>
         </section>
@@ -250,7 +279,7 @@
         <header class="page-head">
           <div>
             <h1>会话</h1>
-            <p>本机会话列表和每条用量。不含对话正文。点击一行可展开明细。</p>
+            <p class="lede">本机会话列表和每条用量。不含对话正文。点击一行可展开明细。</p>
           </div>
           <label class="inline grow">筛选
             <input type="search" id="session-filter" placeholder="标题、模型或账号">
