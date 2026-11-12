@@ -406,6 +406,11 @@ def setup_state(args) -> None:
 
 
 def serve(args=None):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     args = args or parse_args()
     setup_state(args)
     if args.init_token:
