@@ -93,7 +93,7 @@
   "api_unit_prices": {
     "currency": "CNY",
     "unit": "CNY / million tokens",
-    "note": "主源 ModelLink cost_cn，并与官文核对。峰谷按条目填写。glm-5.3-flash 人民币单价已于 2026-11-12 对照智谱官方定价页填写；deepseek-v4.1-flash 已于同日对照 DeepSeek 官方定价页填写（官文写明 deepseek-flash 当前版本即 DeepSeek-V4.1-Flash-1017）。",
+    "note": "主源 ModelLink cost_cn，并与官文核对。峰谷按条目填写。glm-5.3-flash 人民币单价已于 2026-11-12 对照智谱官方定价页填写；deepseek-v4.1-flash 已于同日对照 DeepSeek 官方定价页填写（官文写明 deepseek-flash 当前版本即 DeepSeek-V4.1-Flash-1017）。 glm-5.3-flashx 与 glm-5.1 已于 2026-11-12 对照智谱官方定价页填写（glm-5.1 按输入长度分档）。DeepSeek 高峰按每次调用的北京时间窗口计算。",
     "models": [
       {
         "id": "deepseek-flash",
@@ -230,6 +230,112 @@
         "retrieved_at": "2026-11-12",
         "status": "没读到",
         "note": "WorkBuddy 客户端里 hy4free 曾有限时免费额度（积分倍率 0，活动期至 2026-11-15），那是积分活动，不是官方 API 按量单价，且额度用完后仍会扣积分。腾讯云混元 Hy4 标准接口另有刊例价，但不能当成 hy4-free 的官方单价。未在官方定价页读到「免费即 0 元/百万 token」的表述，故保持没读到，不把价格写成 0。"
+      },
+      {
+        "id": "glm-5.3-flashx",
+        "match": [
+          "glm-5.3-flashx",
+          "GLM-5.3-FlashX",
+          "GLM-5.3-Flashx"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 2,
+        "output": 7,
+        "cached_read": 0.57,
+        "source": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+        "source_via": "智谱官方定价页「最新模型」表（2026-11-12 核对）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "取自智谱官方定价页：GLM-5.3-FlashX 输入 2 元、输出 7 元、缓存命中 0.57 元 / 百万 Tokens；缓存存储限时免费（不计入按量估算）。本条用标准价，该页未给出高峰/闲时价。"
+      },
+      {
+        "id": "glm-5.1",
+        "match": [
+          "glm-5.1",
+          "GLM-5.1"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": 6,
+        "output": 24,
+        "cached_read": 1.3,
+        "tiers": [
+          {
+            "max_prompt_exclusive": 32000,
+            "input": 6,
+            "output": 24,
+            "cached_read": 1.3,
+            "note": "输入长度 [0, 32K)"
+          },
+          {
+            "min_prompt": 32000,
+            "input": 8,
+            "output": 28,
+            "cached_read": 2,
+            "note": "输入长度 ≥32K"
+          }
+        ],
+        "source": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+        "source_via": "智谱官方定价页「文本模型」表（2026-11-12 核对）",
+        "retrieved_at": "2026-11-12",
+        "status": "ok",
+        "note": "官方按输入长度分两档。本工具按该次调用的 prompt_tokens 选档：小于 32000 用 输入 6 / 输出 24 / 缓存命中 1.3；大于等于 32000 用 8 / 28 / 2。表头「输入」列写的是低档，便于一览；实际估算走分档。该页未给出高峰/闲时价。"
+      },
+      {
+        "id": "kimi-k3-2",
+        "match": [
+          "kimi-k3-2",
+          "Kimi-K3-2",
+          "kimi-k3.2"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "没读到",
+        "source_via": "2026-11-12 查阅月之暗面官方定价页 https://platform.kimi.com/docs/pricing/chat 与 https://platform.kimi.ai/ ，未见名为 kimi-k3-2 的条目。不能把 kimi-k3 或 kimi-k3.1-pro 的价格套用过来。",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "官方定价页未读到 kimi-k3-2 的按量单价，保持没读到。"
+      },
+      {
+        "id": "mimo-v2.5-pro",
+        "match": [
+          "mimo-v2.5-pro",
+          "MiMo-V2.5-Pro",
+          "mimo-v2.5-pro"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go",
+        "source_via": "2026-11-12 打开小米 MiMo 官方定价页和模型页，页面为前端渲染，本次未能读到可摘录的具体按量数字；也不把 MiMo-V2.6 的价格套用到 V2.5。",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "未从官方页面读到 mimo-v2.5-pro 的按量单价，保持没读到。"
+      },
+      {
+        "id": "volc-ep-endpoints",
+        "match": [
+          "ep-i72eb58u",
+          "ep-8l4n27h2",
+          "ep-boahh1o6",
+          "ep-07iye0i1"
+        ],
+        "currency": "CNY",
+        "unit": "CNY / million tokens",
+        "input": "没读到",
+        "output": "没读到",
+        "cached_read": "没读到",
+        "source": "没读到",
+        "source_via": "2026-11-12 查阅。这类 ep- 是火山方舟上的推理接入点编号，不是公开模型名，官方定价页无法按该编号给出通用单价，也不能臆测背后是哪个模型。",
+        "retrieved_at": "2026-11-12",
+        "status": "没读到",
+        "note": "火山方舟自定义接入点，未读到对应的公开按量单价，保持没读到。"
       }
     ]
   },
@@ -328,5 +434,62 @@
         "limited_offer": false
       }
     }
+  },
+  "workbuddy_credit_rules": {
+    "status": "ok",
+    "source": "https://www.workbuddy.cn/docs/workbuddy/Credits",
+    "source_title": "WorkBuddy「积分」页",
+    "retrieved_at": "2026-11-12",
+    "related_pages": [
+      {
+        "source": "https://www.workbuddy.cn/docs/workbuddymini/features/Select-Model",
+        "source_title": "WorkBuddy Mini「选择模型」页的积分消耗倍率",
+        "retrieved_at": "2026-11-12"
+      },
+      {
+        "source": "https://www.workbuddy.cn/docs/workbuddy/Pricing",
+        "source_title": "WorkBuddy 定价详情",
+        "retrieved_at": "2026-11-12"
+      }
+    ],
+    "summary": [
+      "所有对话相关请求均需消耗积分；消耗量与模型定价和任务复杂度有关。",
+      "高级模型输入和输出 Token 的处理单价更高，处理相同数量 Token 消耗的积分更多。",
+      "简单任务消耗较少，复杂任务（长代码分析、多轮对话、知识库检索）消耗更多。",
+      "循环执行确认：被暂停的工具调用尚未执行，不产生该次调用的积分；循环检测本身不产生额外积分。终止请求时，已产生但尚未生成最终回答的模型消耗将进入退费评估，实际是否退费以系统处理结果为准。",
+      "扣减顺序：优先使用最先到期的积分；到期时间相同则先扣基础积分，再扣赠送积分。",
+      "部分模型在「选择模型」页标有积分消耗倍率（如 Deepseek-V4-Flash x0.06、Kimi-K3 x1.62）；数字越低消耗越少。Auto、MiniMax-M2.7 等官方未标倍率。Hy3 标为限时免费。",
+      "官方没有公布「1 积分等于多少 Token」或「每百万 token 扣多少积分」的精确公式，因此不能从倍率单独算出应扣积分的绝对值。"
+    ],
+    "exact_formula_status": "没读到",
+    "exact_formula_note": "官方文档只给出定性规则和部分模型的界面倍率，未公布每百万 token 的积分费率。本工具不会把第三方实测系数当成官方规则。有本机 rawUsage 时，积分换 token 只从本机记录反推，并明确标注不是官方汇率。"
+  },
+  "deepseek_peak_windows": {
+    "timezone": "Asia/Shanghai",
+    "windows": [
+      "09:00-12:00",
+      "14:00-18:00"
+    ],
+    "end_exclusive": true,
+    "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing.md",
+    "retrieved_at": "2026-11-12",
+    "holiday_source": "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm",
+    "holiday_source_title": "国务院办公厅关于2026年部分节假日安排的通知（国办发明电〔2025〕7号）",
+    "statutory_holidays_2026": [
+      "2026-01-01",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-02-19",
+      "2026-04-05",
+      "2026-05-01",
+      "2026-05-02",
+      "2026-06-19",
+      "2026-09-25",
+      "2026-10-01",
+      "2026-10-02",
+      "2026-10-03"
+    ],
+    "note": "高峰只发生在北京时间周一至周五、且不是中国法定节假日的上述两段窗口（右开区间）。法定节假日按全体公民放假节日，不是国务院调休放假的全部日期。周末（含调休上班的周六周日）全天闲时。"
   }
 }

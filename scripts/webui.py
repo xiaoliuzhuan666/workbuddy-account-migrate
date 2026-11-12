@@ -45,6 +45,7 @@ from workbuddy_core.usage import (  # noqa: E402
     collect_usage,
     iter_project_jsonl,
     parse_raw_usage_line,
+    list_session_calls,
     _empty_bucket,
     _add,
     _metrics,
@@ -317,6 +318,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(200, data)
             if path == "/api/sessions":
                 return self._send_json(200, self._sessions(q))
+            if path.startswith("/api/sessions/") and path.endswith("/calls"):
+                sid = path[len("/api/sessions/"):-len("/calls")]
+                return self._send_json(200, self._session_calls(sid, q))
+            if path == "/api/timeline":
+                return self._send_json(200, self._timeline(q))
             if path == "/api/usage":
                 return self._send_json(200, self._usage(q))
             if path == "/api/rates":
@@ -439,11 +445,30 @@ class Handler(BaseHTTPRequestHandler):
         for s in data.get("sessions") or []:
             u = su.get(s["id"]) or {}
             s["usage"] = u
+        ut = usage.totals or {}
+        data["ok"] = True
         data["usage_totals"] = {
+            "scope": "all_sessions",
             "files_scanned": usage.files_scanned,
             "calls": usage.calls,
+            "session_count": ut.get("session_count") or len(usage.by_session),
+            "total_tokens": ut.get("total_tokens") or 0,
+            "prompt_tokens": ut.get("prompt_tokens") or 0,
+            "uncached_input": ut.get("uncached_input") or 0,
+            "cache_hit_tokens": ut.get("cache_hit_tokens") or 0,
+            "completion_tokens": ut.get("completion_tokens") or 0,
+            "thinking_tokens": ut.get("thinking_tokens") or 0,
+            "credit": ut.get("credit") or 0,
+            "cache_hit_rate": ut.get("cache_hit_rate"),
         }
-        data["official_totals"] = _official_totals(data.get("sessions") or [])
+        data["official_totals"] = usage.official_totals or {}
+        data["page_official_totals"] = _official_totals(data.get("sessions") or [])
+        data["timeline"] = {
+            "timezone": (usage.timeline or {}).get("timezone") or "Asia/Shanghai",
+            "by_day": (usage.timeline or {}).get("by_day") or [],
+            "calls_without_time": (usage.timeline or {}).get("calls_without_time") or 0,
+        }
+        data["credit_rules"] = usage.credit_rules or {}
         return data
 
     def _usage(self, q):
@@ -459,7 +484,10 @@ class Handler(BaseHTTPRequestHandler):
         payload["conversion"] = (rates.conversion(conv).as_dict() if rates.conversion(conv) else None)
         payload["codebuddy"] = cb.as_dict()
         cny = rates.cny_per_credit(conv) if rates else None
-        payload["by_day"] = _aggregate_by_day(resolved.projects_dir, cny)
+        tl = usage.timeline or {}
+        payload["by_day"] = tl.get("by_day") or _aggregate_by_day(resolved.projects_dir, cny)
+        payload["by_hour"] = tl.get("by_hour") or []
+        payload["timeline"] = tl
         payload["codebuddy"]["by_day"] = _codebuddy_by_day(payload["codebuddy"], cny)
         from datetime import datetime, timezone, timedelta
         payload["generated_at"] = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
@@ -470,14 +498,56 @@ class Handler(BaseHTTPRequestHandler):
 
     def _prices(self):
         rates = load_rates(STATE.rates_path)
+        raw = rates.raw or {}
         return {
             "ok": True,
             "pricing_policy": rates.pricing_policy,
             "api_unit_prices": rates.api_unit_prices,
             "volc_afp": rates.volc_afp,
+            "official_multipliers": rates.official_multipliers,
+            "workbuddy_credit_rules": raw.get("workbuddy_credit_rules") or {},
+            "deepseek_peak_windows": raw.get("deepseek_peak_windows") or {},
+            "per_million_token_credits": rates.per_million,
             "notes": rates.notes,
             "path": str(STATE.rates_path),
         }
+
+    def _timeline(self, q):
+        resolved = STATE.resolved(q.get("edition"))
+        rates = load_rates(STATE.rates_path)
+        conv = q.get("conversion") or None
+        usage = collect_usage(resolved, rates=rates, conversion_key=conv)
+        tl = usage.timeline or {}
+        gran = (q.get("granularity") or "day").lower()
+        day = (q.get("day") or "").strip()
+        if gran == "hour":
+            rows = tl.get("by_hour") or []
+            if day:
+                rows = [r for r in rows if (r.get("day") or "") == day]
+        else:
+            gran = "day"
+            rows = tl.get("by_day") or []
+        return {
+            "ok": True,
+            "timezone": tl.get("timezone") or "Asia/Shanghai",
+            "granularity": gran,
+            "day": day,
+            "rows": rows,
+            "calls_without_time": tl.get("calls_without_time") or 0,
+            "official_totals": usage.official_totals or {},
+        }
+
+    def _session_calls(self, sid, q):
+        resolved = STATE.resolved(q.get("edition"))
+        rates = load_rates(STATE.rates_path)
+        try:
+            limit = int(q.get("limit") or 200)
+            offset = int(q.get("offset") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad_request", "message": "limit 或 offset 不是数字。"}
+        data = list_session_calls(resolved, sid, rates=rates, limit=limit, offset=offset)
+        data["edition"] = resolved.as_dict()
+        return data
 
     def _compare(self, q):
         model = (q.get("model") or "").strip()

@@ -40,7 +40,7 @@ from workbuddy_core.inference import (
     fit_credit_rates, infer_for_model, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT,
 )
 from workbuddy_core.volc_afp import afp_for_tokens, coef_for_model
-from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models
+from workbuddy_core.equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models, official_cost_by_calls, official_cost_for_call
 from workbuddy_core.rates import NOT_FOUND
 
 PASSED = 0
@@ -574,16 +574,19 @@ def test_inference_afp_equivalent():
     check("用量行带 inference", "inference" in models["glm-5.1"])
     check("fixture 样本不足时 inference 没读到", models["glm-5.1"]["inference"]["status"] == NOT_FOUND)
     check("fixture 不出现 5 万默认", models["glm-5.1"]["inference"]["tokens_per_credit"]["uncached_input"] is None)
-    check("glm-5.1 无精确 API 价则等效没读到", models["glm-5.1"]["equivalent_cny_status"] == NOT_FOUND)
-    # fixture：deepseek-v4.1-flash 现已有官方单价；glm-5.1 仍然没有。合计应为 partial。
+    check("glm-5.1 已对照智谱官文有分档单价", models["glm-5.1"]["equivalent_cny_status"] == "ok" and models["glm-5.1"]["equivalent_cny"] is not None, str(models["glm-5.1"]))
+    expected_glm51 = (0 * 6 + 600 * 1.3 + 20 * 24) / 1_000_000.0
+    check("glm-5.1 按低于 32K 档", abs(models["glm-5.1"]["equivalent_cny"] - expected_glm51) < 1e-9, str(models["glm-5.1"]))
     ds = models["deepseek-v4.1-flash"]
     check("fixture 里 v4.1-flash 等效人民币已算出", ds["equivalent_cny_status"] == "ok" and ds["equivalent_cny"] is not None, str(ds))
+    # fixture 两次调用都在北京时间 16:26 工作日，属高峰。高峰价为闲时两倍。
     # sess-a: 800 uncached + 200 hit + 50 out；sess-b: 200 + 0 + 30
-    # (1000*1 + 200*0.02 + 80*4) / 1e6 = 0.00132
-    expected = (1000 * 1 + 200 * 0.02 + 80 * 4) / 1_000_000.0
-    check("v4.1-flash 等效人民币按闲时价", abs(ds["equivalent_cny"] - expected) < 1e-9, str((ds["equivalent_cny"], expected)))
-    check("有部分模型缺价时总等效为 partial", report.totals.get("equivalent_cny_status") == "partial", str(report.totals))
-    check("总等效只加有价的模型", abs(report.totals.get("equivalent_cny") - round(expected, 4)) < 1e-9, str((report.totals.get("equivalent_cny"), expected)))
+    expected = (1000 * 2 + 200 * 0.04 + 80 * 8) / 1_000_000.0
+    check("v4.1-flash 等效人民币按高峰价（调用时间在高峰窗口）", abs(ds["equivalent_cny"] - expected) < 1e-9, str((ds["equivalent_cny"], expected)))
+    check("v4.1-flash 高峰合计单独给出", ds.get("equivalent_cny_peak") is not None and abs(ds["equivalent_cny_peak"] - expected) < 1e-9, str(ds))
+    total_eq = expected + expected_glm51
+    check("全部有价时总等效为 ok", report.totals.get("equivalent_cny_status") == "ok", str(report.totals))
+    check("总等效是高峰 DeepSeek 加标准 glm-5.1", abs(report.totals.get("equivalent_cny") - round(total_eq, 4)) < 1e-9, str((report.totals.get("equivalent_cny"), total_eq)))
 
 
 def test_prices_api_and_refresh_skeleton():
@@ -644,45 +647,181 @@ def test_session_official_cost():
 
     mixed = official_cost_by_models([
         {"model": "deepseek-v4.1-flash", "uncached_input": 1000, "cache_hit_tokens": 200, "completion_tokens": 50},
-        {"model": "glm-5.1", "uncached_input": 0, "cache_hit_tokens": 600, "completion_tokens": 20},
+        {"model": "kimi-k3-2", "uncached_input": 0, "cache_hit_tokens": 600, "completion_tokens": 20},
     ], prices)
     expected_mix = (1000 * 1 + 200 * 0.02 + 50 * 4) / 1_000_000.0
     check("混合模型 status=partial", mixed["status"] == "partial", str(mixed))
     check("混合模型只计入有价部分", abs(mixed["cny"] - expected_mix) < 1e-9, str(mixed))
     check("混合模型注明未计入", "没读到价格，未计入" in (mixed["note"] or "") and mixed["missing_count"] == 1, str(mixed))
+    check("缺价模型是 kimi-k3-2", "kimi-k3-2" in mixed["missing_models"], str(mixed))
 
-    # 完整 fixture：会话甲混合（v4.1-flash + glm-5.1），会话乙只有 v4.1-flash
+    flashx = official_cost_by_models([
+        {"model": "glm-5.3-flashx", "uncached_input": 1_000_000, "cache_hit_tokens": 1_000_000, "completion_tokens": 1_000_000},
+    ], prices)
+    check("glm-5.3-flashx 三项拆分 2+0.57+7", flashx["status"] == "ok" and abs(flashx["cny"] - 9.57) < 1e-9, str(flashx))
+
+    # 完整 fixture：两次 DeepSeek 调用在高峰，glm-5.1 用标准低档
     home, sid_a, sid_b = make_home()
     resolved = resolve_workbuddy(home=home)
     report = collect_usage(resolved, rates=rates)
     su = report.as_dict()["session_usage"]
     a = su[sid_a]
     b = su[sid_b]
-    check("会话甲官方价为 partial", a["official_cny_status"] == "partial", str(a))
-    expected_a = (800 * 1 + 200 * 0.02 + 50 * 4) / 1_000_000.0
-    check("会话甲只计 v4.1-flash", abs(a["official_cny"] - expected_a) < 1e-9, str(a))
-    check("会话甲缺价模型是 glm-5.1", "glm-5.1" in a["official_cny_missing_models"], str(a))
-    expected_b = (200 * 1 + 0 + 30 * 4) / 1_000_000.0
-    check("会话乙官方价为 ok", b["official_cny_status"] == "ok" and abs(b["official_cny"] - expected_b) < 1e-9, str(b))
+    expected_a_ds = (800 * 2 + 200 * 0.04 + 50 * 8) / 1_000_000.0
+    expected_a_glm = (0 * 6 + 600 * 1.3 + 20 * 24) / 1_000_000.0
+    expected_a = expected_a_ds + expected_a_glm
+    check("会话甲官方价为 ok（两个模型都有价）", a["official_cny_status"] == "ok", str(a))
+    check("会话甲按高峰 DeepSeek 加标准 glm-5.1", abs(a["official_cny"] - expected_a) < 1e-9, str(a))
+    check("会话甲高峰与标准拆开", abs((a.get("official_cny_peak") or 0) - expected_a_ds) < 1e-9 and abs((a.get("official_cny_standard") or 0) - expected_a_glm) < 1e-9, str(a))
+    expected_saved_a = 200 * (2 - 0.04) / 1_000_000.0 + 600 * (6 - 1.3) / 1_000_000.0
+    check("会话甲算出缓存命中省下的费用", a.get("cache_hit_saved") is not None and abs(a["cache_hit_saved"] - expected_saved_a) < 1e-9, str(a))
+    expected_b = (200 * 2 + 0 + 30 * 8) / 1_000_000.0
+    check("会话乙官方价为高峰", b["official_cny_status"] == "ok" and abs(b["official_cny"] - expected_b) < 1e-9, str(b))
+    check("会话有首次和最近调用时间", bool(a.get("first_call_at")) and bool(a.get("last_call_at")), str(a))
 
-    # HTTP：/api/sessions 带官方价和合计
+    # HTTP：/api/sessions 合计覆盖全部会话，带高峰拆分和缓存命中
     token_file = home / ".config" / "workbuddy-account-migrate" / "webui-token"
     httpd, port, token = _start_server(home, token_file)
     try:
-        st, obj, raw = _req(port, "GET", "/api/sessions?limit=200")
+        st, obj, raw = _req(port, "GET", "/api/sessions?limit=1")
         check("GET /api/sessions 200", st == 200, str((st, obj)))
         blob = raw.decode("utf-8")
         check("会话接口不含假凭证", "SUPER_SECRET" not in blob and "ANOTHER_SECRET" not in blob)
-        by_id = {s["id"]: s for s in (obj.get("sessions") or [])}
-        ua = (by_id[sid_a].get("usage") or {})
-        check("接口里会话甲有官方价", ua.get("official_cny_status") == "partial" and abs(ua["official_cny"] - expected_a) < 1e-9, str(ua))
+        check("limit=1 时列表只有 1 条", len(obj.get("sessions") or []) == 1, str(len(obj.get("sessions") or [])))
         totals = obj.get("official_totals") or {}
-        check("接口合计含总 token", totals.get("total_tokens") is not None and totals["total_tokens"] > 0, str(totals))
-        check("接口合计官方价只计入有价部分", totals.get("official_cny_status") == "partial" and abs(totals["official_cny"] - (expected_a + expected_b)) < 1e-9, str(totals))
-        check("合计注明未计入", "没读到价格，未计入" in (totals.get("official_cny_note") or ""), str(totals))
+        ut = obj.get("usage_totals") or {}
+        check("合计范围是全部会话", totals.get("scope") == "all_sessions" and ut.get("scope") == "all_sessions", str((ut, totals)))
+        check("limit=1 时合计仍覆盖 2 个会话", ut.get("session_count") == 2 and totals.get("session_count") == 2, str((ut, totals)))
+        check("接口合计含总 token", totals.get("total_tokens") == 1800, str(totals))
+        check("接口合计缓存命中和命中率", totals.get("cache_hit_tokens") == 800 and totals.get("cache_hit_rate") is not None, str(totals))
+        expected_all = expected_a + expected_b
+        check("接口合计官方价覆盖全部会话", totals.get("official_cny_status") == "ok" and abs(totals["official_cny"] - expected_all) < 1e-9, str(totals))
+        check("接口合计带高峰拆分", abs((totals.get("official_cny_peak") or 0) - (expected_a_ds + expected_b)) < 1e-9, str(totals))
+        expected_saved = expected_saved_a  # 会话乙无缓存命中
+        check("接口合计含缓存命中省下的费用", totals.get("cache_hit_saved") is not None and abs(totals["cache_hit_saved"] - expected_saved) < 1e-9, str(totals))
+        check("合计注明按调用时间区分高峰", "高峰" in (totals.get("official_cny_period_note") or ""), str(totals))
+        check("时间线按日返回", isinstance((obj.get("timeline") or {}).get("by_day"), list) and (obj["timeline"]["by_day"]), str(obj.get("timeline")))
+
+        st, calls, raw2 = _req(port, "GET", "/api/sessions/%s/calls?limit=50" % sid_a)
+        check("GET 会话调用明细 200", st == 200 and calls.get("ok") and calls.get("total") == 2, str(calls))
+        blob2 = raw2.decode("utf-8")
+        check("调用明细不含提问原文", "用户提问原文" not in blob2 and "SECRET" not in blob2)
+        rows = calls.get("calls") or []
+        check("调用有北京时间", all(r.get("time_local") and r.get("timezone") == "Asia/Shanghai" for r in rows), str(rows))
+        check("DeepSeek 调用标为高峰", any(r.get("model") == "deepseek-v4.1-flash" and r.get("period") == "peak" for r in rows), str(rows))
+        ds_row = next(r for r in rows if r.get("model") == "deepseek-v4.1-flash")
+        check("调用明细有缓存命中和省下的费用", ds_row.get("cache_hit_tokens") == 200 and ds_row.get("cache_hit_saved") is not None, str(ds_row))
+
+        st, tl, _ = _req(port, "GET", "/api/timeline?granularity=day")
+        check("GET /api/timeline 200", st == 200 and tl.get("ok") and (tl.get("rows") or []), str(tl))
+        day = (tl["rows"][0])
+        check("时间线含缓存命中和官方价", day.get("cache_hit_tokens") is not None and day.get("official_cny") is not None, str(day))
+
+        st, prices, _ = _req(port, "GET", "/api/prices")
+        check("价格接口含 WorkBuddy 积分规则", st == 200 and (prices.get("workbuddy_credit_rules") or {}).get("exact_formula_status") == NOT_FOUND, str(prices.get("workbuddy_credit_rules")))
+        check("价格接口含高峰窗口说明", "09:00" in str((prices.get("deepseek_peak_windows") or {}).get("windows")), str(prices.get("deepseek_peak_windows")))
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_peak_hours_and_cache_savings():
+    print("\n[高峰窗口与缓存命中省下的费用]")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from workbuddy_core.peak_hours import classify_timestamp, is_deepseek_peak, PEAK_RULE
+
+    tz = ZoneInfo("Asia/Shanghai")
+
+    def ms(s):
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
+        return int(dt.timestamp() * 1000)
+
+    cases = [
+        ("2026-11-10 09:00:00", "peak"),
+        ("2026-11-10 11:59:59", "peak"),
+        ("2026-11-10 12:00:00", "offpeak"),
+        ("2026-11-10 13:59:59", "offpeak"),
+        ("2026-11-10 14:00:00", "peak"),
+        ("2026-11-10 17:59:59", "peak"),
+        ("2026-11-10 18:00:00", "offpeak"),
+        ("2026-11-14 10:00:00", "offpeak"),  # 周六
+        ("2026-05-01 10:00:00", "offpeak"),  # 劳动节周五
+        ("2026-05-04 10:00:00", "peak"),     # 调休放假周一，按字面不是法定节假日
+        ("2026-10-10 10:00:00", "offpeak"),  # 调休上班周六，仍按周末
+        ("2026-02-16 10:00:00", "offpeak"),  # 除夕
+    ]
+    for s, exp in cases:
+        got = classify_timestamp(ms(s))["period"]
+        check("高峰判断 %s 为 %s" % (s, exp), got == exp, "%s -> %s" % (s, got))
+    check("高峰规则带来源", "api-docs.deepseek.com" in PEAK_RULE["source"] and PEAK_RULE["timezone"] == "Asia/Shanghai")
+
+    rates = load_rates(ROOT / "config" / "model_rates.json")
+    prices = rates.api_unit_prices
+    # 100 万缓存命中、闲时：实际 0.02 元；若按未命中 1 元计会多花 0.98
+    off = official_cost_for_call({
+        "model": "deepseek-v4.1-flash",
+        "uncached_input": 0,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 0,
+        "prompt_tokens": 1_000_000,
+        "timestamp": ms("2026-11-14 10:00:00"),
+    }, prices)
+    check("闲时缓存命中官方价 0.02", off["status"] == "ok" and abs(off["cny"] - 0.02) < 1e-9, str(off))
+    check("闲时缓存命中省 0.98", off.get("cache_hit_saved") is not None and abs(off["cache_hit_saved"] - 0.98) < 1e-9, str(off))
+    check("周末调用标闲时", off.get("period") == "offpeak", str(off))
+
+    pk = official_cost_for_call({
+        "model": "deepseek-v4.1-flash",
+        "uncached_input": 0,
+        "cache_hit_tokens": 1_000_000,
+        "completion_tokens": 0,
+        "prompt_tokens": 1_000_000,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    check("高峰缓存命中官方价 0.04", pk["status"] == "ok" and abs(pk["cny"] - 0.04) < 1e-9, str(pk))
+    check("高峰缓存命中省 1.96", abs(pk["cache_hit_saved"] - 1.96) < 1e-9, str(pk))
+    check("工作日上午标高峰", pk.get("period") == "peak", str(pk))
+
+    # 没有时间戳：按闲时并标明
+    unk = official_cost_for_call({
+        "model": "deepseek-v4.1-flash",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 0,
+        "completion_tokens": 0,
+        "timestamp": None,
+    }, prices)
+    check("无时间戳按闲时 1 元", unk["status"] == "ok" and abs(unk["cny"] - 1) < 1e-9 and unk["period"] == "offpeak_unknown_time", str(unk))
+
+    # glm-5.1 分档：32K 边界
+    low = official_cost_for_call({
+        "model": "glm-5.1",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 0,
+        "completion_tokens": 0,
+        "prompt_tokens": 31999,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    high = official_cost_for_call({
+        "model": "glm-5.1",
+        "uncached_input": 1_000_000,
+        "cache_hit_tokens": 0,
+        "completion_tokens": 0,
+        "prompt_tokens": 32000,
+        "timestamp": ms("2026-11-10 10:00:00"),
+    }, prices)
+    check("glm-5.1 低于 32K 用 6 元档", low["status"] == "ok" and abs(low["cny"] - 6) < 1e-9, str(low))
+    check("glm-5.1 达到 32K 用 8 元档", high["status"] == "ok" and abs(high["cny"] - 8) < 1e-9, str(high))
+    check("glm-5.1 没有高峰价，标标准", low.get("period") == "standard", str(low))
+
+    # 应扣积分：官方费率没读到
+    home, sid_a, _ = make_home()
+    resolved = resolve_workbuddy(home=home)
+    report = collect_usage(resolved, rates=rates)
+    a = report.as_dict()["session_usage"][sid_a]
+    check("官方未公布逐 token 积分费率时规则应扣为没读到", a.get("wb_rule_expected_status") == NOT_FOUND and a.get("wb_rule_expected_credit") is None, str(a))
+    cr = report.credit_rules or {}
+    check("规则摘要带来源", "workbuddy.cn" in (cr.get("source") or "") and cr.get("exact_formula_status") == NOT_FOUND, str(cr))
 
 
 def main():
@@ -700,6 +839,7 @@ def main():
         test_inference_afp_equivalent,
         test_prices_api_and_refresh_skeleton,
         test_session_official_cost,
+        test_peak_hours_and_cache_savings,
         test_bind_cli,
     ):
         try:

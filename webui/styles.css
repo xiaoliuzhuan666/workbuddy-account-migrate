@@ -1048,3 +1048,112 @@ td.date { font-variant-numeric: tabular-nums; font-family: var(--mono); font-siz
   #session-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #page-sessions .page-head p.lede { max-width: 420px; }
 }
+
+/* ----- 会话 v3：缓存命中、按日图、调用明细 ----- */
+#session-summary {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+#session-summary .metric.is-cache {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+#session-summary .metric.is-cache .k { color: var(--brand-deep); font-weight: 550; }
+#session-summary .metric.is-cache .v { color: var(--brand-deep); }
+#session-summary .metric .s {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.35;
+}
+#session-summary .metric .s-save {
+  color: var(--good);
+  font-weight: 550;
+}
+.tag-peak {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.tag-offpeak, .tag-standard {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 550;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.cache-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  line-height: 1.25;
+}
+.cache-cell .rate {
+  font-size: 11px;
+  color: var(--brand-deep);
+  font-weight: 550;
+}
+.calls-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.calls-table th, .calls-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  white-space: nowrap;
+}
+.calls-table th {
+  color: var(--muted);
+  font-weight: 550;
+  font-size: 11px;
+}
+.calls-table td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.calls-table .more-row td {
+  text-align: center;
+  color: var(--muted);
+  padding: 10px;
+}
+.calls-loading, .calls-error { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.saved { color: var(--good); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.rules-card { padding: 16px 18px; }
+.rules-card .rules-list {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 780px;
+}
+.rules-card .rules-list li { margin: 0 0 6px; }
+.rules-meta { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.rules-meta a { color: var(--sapphire); }
+#wb-multiplier-table { margin-top: 4px; }
+
+@media (max-width: 1440px) {
+  #session-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1280px) {
+  #session-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1100px) {
+  #session-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #session-table td.cache { font-size: 12px; }
+}
+@media (max-width: 1024px) {
+  #session-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

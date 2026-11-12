@@ -206,6 +206,26 @@
           <p id="rate-note"></p>
         </details>
 
+        <h2 class="block-title">WorkBuddy 积分规则</h2>
+        <div class="card rules-card" id="wb-rules-card">
+          <div id="wb-rules-body">
+            <p class="footnote tight">正在读取官方规则……</p>
+          </div>
+          <div class="table-wrap">
+            <table id="wb-multiplier-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th class="num">官方倍率</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="footnote" id="wb-rules-formula"></p>
+        </div>
+
         <h2 class="block-title">积分换 token（本机反推）</h2>
         <div class="card">
           <div class="table-wrap">
@@ -235,6 +255,7 @@
                   <th>模型</th>
                   <th class="num">调用</th>
                   <th class="num">实际积分</th>
+                  <th class="num">规则应扣</th>
                   <th class="num">套餐折算</th>
                   <th class="num">API 等效</th>
                   <th class="num">缓存命中率</th>
@@ -279,7 +300,7 @@
         <header class="page-head">
           <div>
             <h1>会话</h1>
-            <p class="lede">本机会话列表和每条用量。不含对话正文。点击一行可展开明细。</p>
+            <p class="lede">本机会话和每次调用的时间、用量。不含对话正文。合计覆盖全部会话。官方价按每次调用的北京时间区分高峰和闲时。点击一行可展开调用明细。</p>
           </div>
           <label class="inline grow">筛选
             <input type="search" id="session-filter" placeholder="标题、模型或账号">
@@ -288,6 +309,30 @@
 
         <div class="metric-row" id="session-summary"></div>
         <p class="footnote" id="session-price-note"></p>
+
+        <h2 class="block-title">按日消耗</h2>
+        <div class="card chart-card">
+          <div class="chart-head">
+            <p class="chart-note">按每次调用的北京时间归日。Token 图把缓存命中单独着色；官方价图叠高峰、闲时和标准价，并标出缓存命中省下的费用。</p>
+            <div class="pills" id="session-chart-metric">
+              <button type="button" data-metric="tokens" class="is-on">Token</button>
+              <button type="button" data-metric="credit">积分</button>
+              <button type="button" data-metric="official">官方价</button>
+            </div>
+            <div class="pills" id="session-chart-range">
+              <button type="button" data-range="7d">7 天</button>
+              <button type="button" data-range="30d" class="is-on">30 天</button>
+              <button type="button" data-range="90d">90 天</button>
+              <button type="button" data-range="all">全部</button>
+            </div>
+          </div>
+          <div class="chart-legend" id="session-chart-legend"></div>
+          <div class="chart-box" id="session-chart-box">
+            <svg id="session-chart" role="img" aria-label="按日消耗"></svg>
+            <div class="chart-empty" id="session-chart-empty" hidden>没读到按日用量。</div>
+            <div class="chart-tip" id="session-chart-tip" hidden></div>
+          </div>
+        </div>
 
         <div class="card">
           <div class="table-wrap">
@@ -300,8 +345,9 @@
                   <th class="num">调用</th>
                   <th class="num">积分</th>
                   <th class="num">Token</th>
+                  <th class="num">缓存命中</th>
                   <th class="num">官方价</th>
-                  <th>更新时间</th>
+                  <th>最近调用</th>
                 </tr>
               </thead>
               <tbody></tbody>

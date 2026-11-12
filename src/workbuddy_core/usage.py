@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .paths import ResolvedDir, open_db_readonly
 from .rates import NOT_FOUND, RatesConfig
 from .inference import infer_for_model, DEFAULT_MIN_CALLS, DEFAULT_MIN_R2, FORBIDDEN_DEFAULT_TOKENS_PER_CREDIT
-from .equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models
+from .equivalent_cost import lookup_unit_price, equivalent_cny, official_cost_by_models, official_cost_by_calls, official_cost_for_call
 from .volc_afp import afp_for_tokens, coef_for_model
 
 # 与上游 usage-status 一致的字段名
@@ -281,6 +281,9 @@ class UsageReport:
     totals: dict = field(default_factory=dict)
     cross_check: dict = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    official_totals: dict = field(default_factory=dict)
+    timeline: dict = field(default_factory=dict)
+    credit_rules: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -292,6 +295,9 @@ class UsageReport:
             "totals": self.totals,
             "cross_check": self.cross_check,
             "notes": self.notes,
+            "official_totals": self.official_totals,
+            "timeline": self.timeline,
+            "credit_rules": self.credit_rules,
             # 会话用量单独走 sessions 接口拼，这里只给 id→数字，避免把标题重复塞两遍
             "session_usage": {
                 sid: _session_usage_public(b)
@@ -336,6 +342,26 @@ def _session_usage_public(b: dict) -> dict:
         "official_cny_by_model": official.get("by_model") or [],
         "official_cny_period": official.get("period") or "",
         "official_cny_currency": official.get("currency") or "CNY",
+        "official_cny_peak": official.get("cny_peak"),
+        "official_cny_offpeak": official.get("cny_offpeak"),
+        "official_cny_standard": official.get("cny_standard"),
+        "official_cny_calls_peak": official.get("calls_peak") or 0,
+        "official_cny_calls_offpeak": official.get("calls_offpeak") or 0,
+        "official_cny_calls_standard": official.get("calls_standard") or 0,
+        "official_cny_period_note": official.get("period_note") or "",
+        "official_cny_uncached": official.get("cny_uncached"),
+        "official_cny_cache_hit": official.get("cny_cache_hit"),
+        "official_cny_output": official.get("cny_output"),
+        "cache_hit_saved": official.get("cache_hit_saved"),
+        "cache_hit_rate": (
+            round(min(int(b.get("cache_hit_tokens") or 0), int(b.get("prompt_tokens") or 0)) / int(b["prompt_tokens"]), 6)
+            if b.get("prompt_tokens") else None
+        ),
+        "first_call_at": b.get("first_call_at") or "",
+        "last_call_at": b.get("last_call_at") or "",
+        "wb_rule_expected_credit": b.get("wb_rule_expected_credit"),
+        "wb_rule_expected_status": b.get("wb_rule_expected_status") or NOT_FOUND,
+        "wb_rule_expected_note": b.get("wb_rule_expected_note") or "",
     }
 
 
@@ -381,9 +407,19 @@ def collect_usage(
                         by_session[sid] = _empty_bucket()
                         by_session[sid]["model_counts"] = defaultdict(int)
                         by_session[sid]["by_model"] = defaultdict(_empty_bucket)
+                        by_session[sid]["call_rows"] = []
+                        by_session[sid]["first_ts"] = None
+                        by_session[sid]["last_ts"] = None
                     _add(by_session[sid], call, sid)
                     by_session[sid]["model_counts"][call["model"]] += 1
                     _add(by_session[sid]["by_model"][call["model"]], call, sid)
+                    by_session[sid]["call_rows"].append(call)
+                    ts = call.get("timestamp")
+                    if ts:
+                        if by_session[sid]["first_ts"] is None or ts < by_session[sid]["first_ts"]:
+                            by_session[sid]["first_ts"] = ts
+                        if by_session[sid]["last_ts"] is None or ts > by_session[sid]["last_ts"]:
+                            by_session[sid]["last_ts"] = ts
                     _add(totals, call, sid)
         except OSError:
             errors += 1
@@ -391,20 +427,22 @@ def collect_usage(
     if owners is None:
         owners = read_session_owners(resolved.db_path) if resolved.db_path.exists() else {}
     prices_section = rates.api_unit_prices if rates else {}
+    all_calls = []
     for sid, b in by_session.items():
         b["user_id"] = owners.get(sid, "")
         b["model_counts"] = dict(b.get("model_counts") or {})
         b["by_model"] = dict(b.get("by_model") or {})
-        usages = [
-            {
-                "model": name,
-                "uncached_input": mb["uncached_input"],
-                "cache_hit_tokens": mb["cache_hit_tokens"],
-                "completion_tokens": mb["completion_tokens"],
-            }
-            for name, mb in b["by_model"].items()
-        ]
-        b["official"] = official_cost_by_models(usages, prices_section)
+        rows = b.pop("call_rows", []) or []
+        all_calls.extend(rows)
+        b["official"] = official_cost_by_calls(rows, prices_section)
+        b["first_call_at"] = _fmt_call_time(b.get("first_ts"))
+        b["last_call_at"] = _fmt_call_time(b.get("last_ts"))
+        exp, exp_st, exp_note = _expected_credits_for_models(b.get("by_model") or {}, rates)
+        b["wb_rule_expected_credit"] = exp
+        b["wb_rule_expected_status"] = exp_st
+        b["wb_rule_expected_note"] = exp_note
+    official_all = official_cost_by_calls(all_calls, prices_section)
+    timeline = _build_timeline(all_calls, prices_section, cny)
 
     ledger = read_session_usage_credits(resolved.db_path)
     cross = _cross_check(by_session, ledger)
@@ -431,14 +469,34 @@ def collect_usage(
         inf = infer_for_model(by_model_calls.get(name) or [], min_calls=min_c, min_r2=min_r)
         row["inference"] = inf
         price = lookup_unit_price(rates.api_unit_prices if rates else {}, name) if rates else {"status": NOT_FOUND, "reason": "没有价格表"}
-        eq = equivalent_cny(b["uncached_input"], b["cache_hit_tokens"], b["completion_tokens"], price, use_peak=False)
-        if eq.get("status") == "ok":
-            eq["period_note"] = "默认按闲时/标准价；本地记录未区分高峰。"
-        row["equivalent_cny"] = eq.get("cny")
-        row["equivalent_cny_status"] = eq.get("status")
-        row["equivalent_cny_reason"] = eq.get("reason") or ""
-        row["equivalent_cny_source"] = eq.get("source") or ""
-        row["equivalent_cny_retrieved_at"] = eq.get("retrieved_at") or ""
+        call_eq = official_cost_by_calls(by_model_calls.get(name) or [], prices_section)
+        if call_eq.get("status") in ("ok", "partial") and call_eq.get("cny") is not None:
+            eq_cny, eq_st, eq_reason = call_eq["cny"], call_eq["status"], call_eq.get("note") or ""
+            eq_src = (call_eq.get("by_model") or [{}])[0].get("source") if call_eq.get("by_model") else ""
+            eq_at = (call_eq.get("by_model") or [{}])[0].get("retrieved_at") if call_eq.get("by_model") else ""
+            eq_note = call_eq.get("period_note") or ""
+        else:
+            # 没有按次结果时退回整段闲时/标准价（仍然不把缺价当 0）
+            eq = equivalent_cny(b["uncached_input"], b["cache_hit_tokens"], b["completion_tokens"], price, use_peak=False)
+            eq_cny, eq_st, eq_reason = eq.get("cny"), eq.get("status"), eq.get("reason") or ""
+            eq_src, eq_at = eq.get("source") or "", eq.get("retrieved_at") or ""
+            eq_note = "默认按闲时/标准价。"
+        row["equivalent_cny"] = eq_cny
+        row["equivalent_cny_status"] = eq_st
+        row["equivalent_cny_reason"] = eq_reason
+        row["equivalent_cny_source"] = eq_src or ""
+        row["equivalent_cny_retrieved_at"] = eq_at or ""
+        row["equivalent_cny_peak"] = call_eq.get("cny_peak")
+        row["equivalent_cny_offpeak"] = call_eq.get("cny_offpeak")
+        row["equivalent_cny_standard"] = call_eq.get("cny_standard")
+        row["equivalent_cny_period_note"] = eq_note
+        row["wb_rule_expected_credit"] = row.get("rate_table_estimated_credit")
+        row["wb_rule_expected_status"] = row.get("rate_table_status") or NOT_FOUND
+        row["wb_rule_expected_note"] = (
+            "按配置里已核对的每百万 token 积分费率估算。"
+            if row.get("rate_table_status") == "ok"
+            else "官方未公布每百万 token 积分费率，无法按规则算出应扣积分。界面倍率只说明相对贵贱，不能单独得出积分绝对值。"
+        )
         afp_meta = coef_for_model(rates.volc_afp if rates else {}, name) if rates else {"status": NOT_FOUND}
         # AFP 用全部输入（含缓存）按官文「输入 token」；官文未单独写缓存，注明这一点
         afp = afp_for_tokens(
@@ -457,19 +515,13 @@ def collect_usage(
         model_rows.append(row)
     model_rows.sort(key=lambda r: (-r["credit"], -r["calls"], r["model"]))
 
-    eq_sum = 0.0
-    eq_ok = 0
-    eq_miss = 0
-    for r in model_rows:
-        if r.get("equivalent_cny_status") == "ok" and r.get("equivalent_cny") is not None:
-            eq_sum += r["equivalent_cny"]
-            eq_ok += 1
+    if official_all.get("status") in ("ok", "partial") and official_all.get("cny") is not None:
+        eq_total = round(float(official_all["cny"]), 4)
+        eq_status = official_all["status"]
+        if official_all["status"] == "ok":
+            eq_note = "全部模型都有已核对的官方单价，并按每次调用的北京时间区分高峰和闲时。"
         else:
-            eq_miss += 1
-    if eq_ok and not eq_miss:
-        eq_total, eq_status, eq_note = round(eq_sum, 4), "ok", "全部模型都有已核对的官方单价。"
-    elif eq_ok:
-        eq_total, eq_status, eq_note = round(eq_sum, 4), "partial", "只加总了有官方单价的模型，其余为没读到，不是全部用量。"
+            eq_note = "只加总了有官方单价的模型，其余为没读到，不是全部用量。有价部分已按每次调用时间区分高峰和闲时。"
     else:
         eq_total, eq_status, eq_note = None, NOT_FOUND, "没有模型能按官方 API 单价折算。"
 
@@ -483,6 +535,9 @@ def collect_usage(
         totals=_metrics(totals, cny, None),
         cross_check=cross,
         notes=[n for n in notes if n],
+        official_totals=_official_totals_from(official_all, totals, cny, len(by_session), calls),
+        timeline=timeline,
+        credit_rules=_credit_rules_public(rates),
     )
     report.totals["files_scanned"] = files
     report.totals["parse_errors"] = errors
@@ -490,6 +545,10 @@ def collect_usage(
     report.totals["equivalent_cny"] = eq_total
     report.totals["equivalent_cny_status"] = eq_status
     report.totals["equivalent_cny_note"] = eq_note
+    report.totals["equivalent_cny_peak"] = official_all.get("cny_peak")
+    report.totals["equivalent_cny_offpeak"] = official_all.get("cny_offpeak")
+    report.totals["equivalent_cny_standard"] = official_all.get("cny_standard")
+    report.totals["session_count"] = len(by_session)
     return report
 
 
@@ -569,3 +628,270 @@ def _cross_check(by_session: Dict[str, dict], ledger: dict) -> dict:
         "db_bad_rows": ledger.get("bad") or 0,
         "db_error": ledger.get("error") or "",
     }
+
+
+def _fmt_call_time(ts) -> str:
+    from .peak_hours import unix_to_beijing
+    dt = unix_to_beijing(ts)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def _expected_credits_for_models(by_model: dict, rates: Optional[RatesConfig]):
+    """按官方「每百万 token 积分」费率估算应扣积分。官方没公布费率则没读到。"""
+    if not by_model or not rates:
+        return None, NOT_FOUND, "官方未公布每百万 token 积分费率，无法按规则算出应扣积分。"
+    total = 0.0
+    any_ok = False
+    any_miss = False
+    missing = []
+    for name, mb in by_model.items():
+        pm = rates.per_million_for(name)
+        est = _estimate_from_per_million(mb, pm) if pm else None
+        if est is not None:
+            total += est
+            any_ok = True
+        else:
+            any_miss = True
+            missing.append(name)
+    if any_ok and not any_miss:
+        return round(total, 4), "ok", "按配置里已核对的每百万 token 积分费率估算。"
+    if any_ok:
+        return (
+            round(total, 4),
+            "partial",
+            "只加总了有逐 token 积分费率的模型，其余没读到：%s。" % "、".join(missing[:8]),
+        )
+    return (
+        None,
+        NOT_FOUND,
+        "官方未公布每百万 token 积分费率，无法按规则算出应扣积分。"
+        "界面倍率只说明相对贵贱，不能单独得出积分绝对值。",
+    )
+
+
+def _credit_rules_public(rates: Optional[RatesConfig]) -> dict:
+    if not rates:
+        return {
+            "status": NOT_FOUND,
+            "exact_formula_status": NOT_FOUND,
+            "note": "没有价格表。",
+        }
+    raw = rates.raw or {}
+    rules = raw.get("workbuddy_credit_rules") or {}
+    mul = rates.official_multipliers or {}
+    return {
+        "status": rules.get("status") or "ok",
+        "source": rules.get("source") or "https://www.workbuddy.cn/docs/workbuddy/Credits",
+        "source_title": rules.get("source_title") or "WorkBuddy「积分」页",
+        "retrieved_at": rules.get("retrieved_at") or mul.get("retrieved_at") or "",
+        "summary": rules.get("summary") or [],
+        "exact_formula_status": rules.get("exact_formula_status") or NOT_FOUND,
+        "exact_formula_note": rules.get("exact_formula_note") or (
+            "官方文档说明积分与模型 Token 定价、任务复杂度有关，并公布了部分模型的界面倍率；"
+            "没有公布每百万 token 积分数，因此不能从倍率单独算出应扣积分。"
+        ),
+        "multipliers": mul,
+        "per_million_token_credits": rates.per_million,
+    }
+
+
+def _official_totals_from(official: dict, totals: dict, cny_per_credit, session_count: int, calls: int) -> dict:
+    priced = official.get("priced_count") or 0
+    missing = official.get("missing_count") or 0
+    status = official.get("status") or NOT_FOUND
+    cny = official.get("cny")
+    credit = float(totals.get("credit") or 0)
+    return {
+        "scope": "all_sessions",
+        "session_count": session_count,
+        "calls": calls,
+        "total_tokens": totals.get("total_tokens") or 0,
+        "prompt_tokens": totals.get("prompt_tokens") or 0,
+        "uncached_input": totals.get("uncached_input") or 0,
+        "cache_hit_tokens": totals.get("cache_hit_tokens") or 0,
+        "completion_tokens": totals.get("completion_tokens") or 0,
+        "thinking_tokens": totals.get("thinking_tokens") or 0,
+        "credit": round(credit, 4),
+        "official_cny": cny,
+        "official_cny_status": status,
+        "official_cny_note": official.get("note") or "",
+        "official_cny_period_note": official.get("period_note") or "",
+        "official_cny_peak": official.get("cny_peak"),
+        "official_cny_offpeak": official.get("cny_offpeak"),
+        "official_cny_standard": official.get("cny_standard"),
+        "official_cny_calls_peak": official.get("calls_peak") or 0,
+        "official_cny_calls_offpeak": official.get("calls_offpeak") or 0,
+        "official_cny_calls_standard": official.get("calls_standard") or 0,
+        "official_cny_calls_unknown_time": official.get("calls_unknown_time") or 0,
+        "official_cny_priced_sessions": None,
+        "official_cny_priced_models": priced,
+        "official_cny_missing_models": official.get("missing_models") or [],
+        "official_cny_missing_count": missing,
+        "official_cny_priced_count": priced,
+        "official_cny_uncached": official.get("cny_uncached"),
+        "official_cny_cache_hit": official.get("cny_cache_hit"),
+        "official_cny_output": official.get("cny_output"),
+        "cache_hit_saved": official.get("cache_hit_saved"),
+        "cache_hit_rate": (
+            round(min(int(totals.get("cache_hit_tokens") or 0), int(totals.get("prompt_tokens") or 0)) / int(totals["prompt_tokens"]), 6)
+            if totals.get("prompt_tokens") else None
+        ),
+        "currency": "CNY",
+        "peak_rule": official.get("peak_rule") or {},
+    }
+
+
+def _build_timeline(calls, prices_section, cny_per_credit=None) -> dict:
+    """按北京时间的日期（以及小时）汇总 token、积分和官方价。"""
+    from collections import defaultdict
+    from .peak_hours import classify_timestamp
+
+    def empty():
+        d = _empty_bucket()
+        d.update({
+            "official_cny": 0.0,
+            "official_cny_peak": 0.0,
+            "official_cny_offpeak": 0.0,
+            "official_cny_standard": 0.0,
+            "cache_hit_saved": 0.0,
+            "priced_calls": 0,
+            "unpriced_calls": 0,
+            "calls_peak": 0,
+            "calls_offpeak": 0,
+        })
+        return d
+
+    by_day = defaultdict(empty)
+    by_hour = defaultdict(empty)
+    no_time = 0
+    for call in calls or []:
+        cl = classify_timestamp(call.get("timestamp"))
+        day = cl.get("day") or ""
+        if not day:
+            no_time += 1
+            continue
+        hour_key = "%sT%s" % (day, cl.get("hour") or "00")
+        cost = official_cost_for_call(call, prices_section)
+        for bucket in (by_day[day], by_hour[hour_key]):
+            _add(bucket, call, "x")
+            if cost.get("status") == "ok" and cost.get("cny") is not None:
+                cny = float(cost["cny"])
+                bucket["official_cny"] += cny
+                bucket["priced_calls"] += 1
+                period = cost.get("period") or ""
+                if period == "peak":
+                    bucket["official_cny_peak"] += cny
+                    bucket["calls_peak"] += 1
+                elif period.startswith("offpeak"):
+                    bucket["official_cny_offpeak"] += cny
+                    bucket["calls_offpeak"] += 1
+                else:
+                    bucket["official_cny_standard"] += cny
+                if cost.get("cache_hit_saved") is not None:
+                    bucket["cache_hit_saved"] += float(cost["cache_hit_saved"])
+            else:
+                bucket["unpriced_calls"] += 1
+        by_hour[hour_key]["hour"] = cl.get("hour") or ""
+        by_hour[hour_key]["day"] = day
+
+    def _row(key, bucket, kind):
+        item = _metrics(bucket, cny_per_credit, None)
+        item["day"] = key if kind == "day" else (bucket.get("day") or key[:10])
+        if kind == "hour":
+            item["hour"] = bucket.get("hour") or key[11:13]
+            item["slot"] = key
+        item["official_cny"] = round(bucket["official_cny"], 6)
+        item["official_cny_peak"] = round(bucket["official_cny_peak"], 6)
+        item["official_cny_offpeak"] = round(bucket["official_cny_offpeak"], 6)
+        item["official_cny_standard"] = round(bucket["official_cny_standard"], 6)
+        item["cache_hit_saved"] = round(bucket["cache_hit_saved"], 6)
+        item["priced_calls"] = bucket["priced_calls"]
+        item["unpriced_calls"] = bucket["unpriced_calls"]
+        item["calls_peak"] = bucket["calls_peak"]
+        item["calls_offpeak"] = bucket["calls_offpeak"]
+        return item
+
+    return {
+        "timezone": "Asia/Shanghai",
+        "calls_without_time": no_time,
+        "by_day": [_row(k, by_day[k], "day") for k in sorted(by_day)],
+        "by_hour": [_row(k, by_hour[k], "hour") for k in sorted(by_hour)],
+    }
+
+
+def list_session_calls(
+    resolved: ResolvedDir,
+    session_id: str,
+    rates: Optional[RatesConfig] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """读某一个会话 jsonl 的每次调用。只返回用量和时间，不含对话正文。"""
+    sid = str(session_id or "").strip()
+    out = {
+        "ok": True,
+        "session_id": sid,
+        "total": 0,
+        "limit": limit,
+        "offset": offset,
+        "calls": [],
+        "error": "",
+    }
+    if not sid or any(ch in sid for ch in ("/", "\\", "..")):
+        out["ok"] = False
+        out["error"] = "会话编号不合法。"
+        return out
+    files = [fp for fp in iter_project_jsonl(resolved.projects_dir) if fp.stem == sid]
+    if not files:
+        return out
+    prices = rates.api_unit_prices if rates else {}
+    rows = []
+    for fp in files:
+        try:
+            with open(fp, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    call = parse_raw_usage_line(line)
+                    if not call:
+                        continue
+                    cost = official_cost_for_call(call, prices)
+                    rows.append({
+                        "timestamp": call.get("timestamp") or 0,
+                        "time_local": cost.get("time_local") or _fmt_call_time(call.get("timestamp")),
+                        "timezone": "Asia/Shanghai",
+                        "period": cost.get("period") or "unknown",
+                        "window": cost.get("window") or "unknown",
+                        "period_reason": cost.get("period_reason") or "",
+                        "model": call.get("model") or "",
+                        "prompt_tokens": call.get("prompt_tokens") or 0,
+                        "uncached_input": call.get("uncached_input") or 0,
+                        "cache_hit_tokens": call.get("cache_hit_tokens") or 0,
+                        "completion_tokens": call.get("completion_tokens") or 0,
+                        "thinking_tokens": call.get("thinking_tokens") or 0,
+                        "total_tokens": call.get("total_tokens") or 0,
+                        "credit": round(float(call.get("credit") or 0), 4),
+                        "official_cny": cost.get("cny"),
+                        "official_cny_status": cost.get("status") or NOT_FOUND,
+                        "official_cny_reason": cost.get("reason") or "",
+                        "official_cny_uncached": cost.get("cny_uncached"),
+                        "official_cny_cache_hit": cost.get("cny_cache_hit"),
+                        "official_cny_output": cost.get("cny_output"),
+                        "cache_hit_saved": cost.get("cache_hit_saved"),
+                        "cache_hit_rate": (
+                            round(min(int(call.get("cache_hit_tokens") or 0), int(call.get("prompt_tokens") or 0)) / int(call["prompt_tokens"]), 6)
+                            if call.get("prompt_tokens") else None
+                        ),
+                    })
+        except OSError:
+            continue
+    rows.sort(key=lambda r: (r.get("timestamp") or 0, r.get("time_local") or ""))
+    out["total"] = len(rows)
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        limit = 200
+    if limit > 2000:
+        limit = 2000
+    out["offset"] = offset
+    out["limit"] = limit
+    out["calls"] = rows[offset:offset + limit]
+    return out

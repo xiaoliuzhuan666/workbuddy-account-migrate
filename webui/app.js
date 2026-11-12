@@ -30,6 +30,12 @@
     chartRange: "30d",
     openSession: "",
     openModel: "",
+    sessionTotals: null,
+    sessionTimeline: null,
+    creditRules: null,
+    sessionChartMetric: "tokens",
+    sessionChartRange: "30d",
+    sessionCalls: {},
   };
 
   function fmt(n, d) {
@@ -107,6 +113,7 @@
     if (range === "today") return day === today;
     if (range === "7d") return day >= shiftDay(today, -6) && day <= today;
     if (range === "30d") return day >= shiftDay(today, -29) && day <= today;
+    if (range === "90d") return day >= shiftDay(today, -89) && day <= today;
     if (range === "month") return day.slice(0, 7) === today.slice(0, 7);
     return true;
   }
@@ -222,6 +229,9 @@
     }
     if (name === "tokens" && state.usage) {
       requestAnimationFrame(() => renderTokenPage());
+    }
+    if (name === "sessions") {
+      requestAnimationFrame(() => renderSessionChart());
     }
   }
   window.addEventListener("hashchange", () => showPage(currentHashPage(), { silent: true }));
@@ -496,7 +506,7 @@
     const tb = $("model-table").querySelector("tbody");
     const rows = usage.by_model || [];
     if (!rows.length) {
-      tb.innerHTML = emptyRow(6, "还没有用量", "这个数据目录里还没有读到 rawUsage。");
+      tb.innerHTML = emptyRow(7, "还没有用量", "这个数据目录里还没有读到 rawUsage。");
       const bar = $("cross-check-bar");
       if (bar) bar.hidden = true;
       return;
@@ -523,7 +533,7 @@
         const open = state.openModel === r.model;
         const detail =
           "<tr class='model-detail' data-for='" + escapeHtml(r.model) + "'" + (open ? "" : " hidden") + ">" +
-          "<td colspan='6'><div class='detail-grid'>" +
+          "<td colspan='7'><div class='detail-grid'>" +
           "<div><div class='k'>输入 token</div><div class='v'>" + escapeHtml(fmt(r.prompt_tokens, 0)) + "</div></div>" +
           "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(r.completion_tokens, 0)) + "</div></div>" +
           "<div><div class='k'>思考 token</div><div class='v'>" + escapeHtml(fmt(r.thinking_tokens, 0)) + "</div></div>" +
@@ -540,6 +550,10 @@
           "<td class='clip' title='" + escapeHtml(r.model) + "'>" + escapeHtml(r.model) + "</td>" +
           '<td class="num">' + fmt(r.calls, 0) + "</td>" +
           '<td class="num">' + fmt(r.credit, 2) + "</td>" +
+          '<td class="num" title="' + escapeHtml(r.wb_rule_expected_note || "") + '">' +
+            (r.wb_rule_expected_status === "ok" && r.wb_rule_expected_credit != null
+              ? escapeHtml(fmt(r.wb_rule_expected_credit, 2))
+              : na("没读到")) + "</td>" +
           '<td class="num">' + (cny == null ? na("没读到") : escapeHtml(cny)) + "</td>" +
           '<td class="num">' + (eq == null ? na("没读到") : escapeHtml(eq)) + "</td>" +
           '<td class="num">' + (hit == null ? na("没读到") : escapeHtml(hit)) + "</td>" +
@@ -953,44 +967,129 @@
     return na("没读到");
   }
 
-  function renderSessionSummary(rows) {
+  function cacheCell(tokens, rate) {
+    const tok = compact(tokens || 0);
+    const r = rate == null ? "" : pct(rate);
+    return (
+      '<div class="cache-cell" title="缓存命中 ' + escapeHtml(fmt(tokens || 0, 0)) +
+        (r ? "，命中率 " + r : "") + '">' +
+      '<span>' + escapeHtml(tok) + "</span>" +
+      (r ? '<span class="rate">' + escapeHtml(r) + "</span>" : "") +
+      "</div>"
+    );
+  }
+
+  function periodTag(period) {
+    if (period === "peak") return '<span class="tag-peak">高峰</span>';
+    if (period && period.indexOf("offpeak") === 0) return '<span class="tag-offpeak">闲时</span>';
+    if (period === "standard") return '<span class="tag-standard">标准</span>';
+    return "";
+  }
+
+  function totalsFromApi() {
+    const u = (state.sessionTotals && state.sessionTotals.usage) || {};
+    const o = (state.sessionTotals && state.sessionTotals.official) || {};
+    return { u: u, o: o };
+  }
+
+  function renderSessionSummary(filteredRows, isFilter) {
     const box = $("session-summary");
     const noteEl = $("session-price-note");
     if (!box) return;
-    if (!rows.length) {
-      box.innerHTML = "";
-      if (noteEl) noteEl.textContent = "";
-      return;
-    }
     let tokens = 0, prompt = 0, uncached = 0, hit = 0, output = 0, credit = 0;
-    let cny = 0, priced = 0, missingCount = 0;
-    const missingModels = {};
-    rows.forEach((s) => {
-      const u = s.usage || {};
-      tokens += Number(u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0)));
-      prompt += Number(u.prompt_tokens || 0);
-      uncached += Number(u.uncached_input || 0);
-      hit += Number(u.cache_hit_tokens || 0);
-      output += Number(u.completion_tokens || 0);
-      credit += Number(u.credit || 0);
-      const st = u.official_cny_status;
-      if ((st === "ok" || st === "partial") && u.official_cny != null) {
-        cny += Number(u.official_cny);
-        priced += 1;
+    let cny = null, cnyPeak = 0, cnyOff = 0, cnyStd = 0, saved = null;
+    let priced = false, missingCount = 0, missingModels = [];
+    let sessionCount = 0, scopeLabel = "";
+    let hitRate = null;
+    let callsPeak = 0, callsOff = 0;
+    let periodNote = "";
+
+    if (!isFilter) {
+      const { u, o } = totalsFromApi();
+      tokens = Number(u.total_tokens || o.total_tokens || 0);
+      prompt = Number(u.prompt_tokens || o.prompt_tokens || 0);
+      uncached = Number(u.uncached_input || o.uncached_input || 0);
+      hit = Number(u.cache_hit_tokens || o.cache_hit_tokens || 0);
+      output = Number(u.completion_tokens || o.completion_tokens || 0);
+      credit = Number(u.credit || o.credit || 0);
+      sessionCount = Number(u.session_count || o.session_count || (filteredRows || []).length);
+      scopeLabel = "全部 " + sessionCount + " 个会话";
+      hitRate = u.cache_hit_rate != null ? u.cache_hit_rate : (o.cache_hit_rate != null ? o.cache_hit_rate : (prompt ? Math.min(hit, prompt) / prompt : null));
+      if ((o.official_cny_status === "ok" || o.official_cny_status === "partial") && o.official_cny != null) {
+        cny = Number(o.official_cny);
+        priced = true;
+        cnyPeak = Number(o.official_cny_peak || 0);
+        cnyOff = Number(o.official_cny_offpeak || 0);
+        cnyStd = Number(o.official_cny_standard || 0);
+        saved = o.cache_hit_saved != null ? Number(o.cache_hit_saved) : null;
+        callsPeak = o.official_cny_calls_peak || 0;
+        callsOff = o.official_cny_calls_offpeak || 0;
       }
-      const miss = u.official_cny_missing_count || (u.official_cny_missing_models || []).length;
-      missingCount += Number(miss || 0);
-      (u.official_cny_missing_models || []).forEach((m) => { missingModels[m] = 1; });
-    });
+      missingCount = o.official_cny_missing_count || (o.official_cny_missing_models || []).length;
+      missingModels = o.official_cny_missing_models || [];
+      periodNote = o.official_cny_period_note || "";
+    } else {
+      const rows = filteredRows || [];
+      if (!rows.length) {
+        box.innerHTML = "";
+        if (noteEl) noteEl.textContent = "";
+        return;
+      }
+      sessionCount = rows.length;
+      scopeLabel = "筛选后 " + sessionCount + " 个会话";
+      let cnySum = 0, savedSum = 0, savedOk = false;
+      const missingSet = {};
+      rows.forEach((s) => {
+        const u = s.usage || {};
+        tokens += Number(u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0)));
+        prompt += Number(u.prompt_tokens || 0);
+        uncached += Number(u.uncached_input || 0);
+        hit += Number(u.cache_hit_tokens || 0);
+        output += Number(u.completion_tokens || 0);
+        credit += Number(u.credit || 0);
+        const st = u.official_cny_status;
+        if ((st === "ok" || st === "partial") && u.official_cny != null) {
+          cnySum += Number(u.official_cny);
+          priced = true;
+          cnyPeak += Number(u.official_cny_peak || 0);
+          cnyOff += Number(u.official_cny_offpeak || 0);
+          cnyStd += Number(u.official_cny_standard || 0);
+          if (u.cache_hit_saved != null) { savedSum += Number(u.cache_hit_saved); savedOk = true; }
+        }
+        missingCount += Number(u.official_cny_missing_count || (u.official_cny_missing_models || []).length || 0);
+        (u.official_cny_missing_models || []).forEach((m) => { missingSet[m] = 1; });
+      });
+      cny = priced ? cnySum : null;
+      saved = savedOk ? savedSum : null;
+      missingModels = Object.keys(missingSet);
+      hitRate = prompt ? Math.min(hit, prompt) / prompt : null;
+    }
+
+    const officialSub = [];
+    if (priced) {
+      const parts = [];
+      if (cnyPeak) parts.push("高峰 " + fmtCny(cnyPeak));
+      if (cnyOff) parts.push("闲时 " + fmtCny(cnyOff));
+      if (cnyStd) parts.push("标准 " + fmtCny(cnyStd));
+      if (parts.length) officialSub.push(parts.join(" · "));
+      if (callsPeak || callsOff) officialSub.push("高峰 " + callsPeak + " 次，闲时 " + callsOff + " 次");
+      if (saved != null) officialSub.push("缓存命中省 " + fmtCny(saved));
+    }
+
     const cards = [
-      { k: "总 Token", v: compact(tokens), s: rows.length + " 个会话" },
-      { k: "输入", v: compact(prompt), s: "未命中 " + compact(uncached) + " / 命中 " + compact(hit) },
+      { k: "总 Token", v: compact(tokens), s: scopeLabel },
+      { k: "输入", v: compact(prompt), s: "未命中 " + compact(uncached) },
+      { k: "缓存命中", v: compact(hit), s: hitRate == null ? "" : "命中率 " + pct(hitRate), cache: true },
       { k: "输出", v: compact(output), s: "" },
       { k: "积分", v: fmt(credit, 2), s: "" },
       {
         k: "官方价",
         v: priced ? fmtCny(cny) : "没读到",
-        s: priced && missingCount ? "已计入有价部分" : (priced ? "按闲时 / 标准价" : ""),
+        s: officialSub.join("\n"),
+        sHtml: officialSub.map(function (line, i) {
+          const cls = line.indexOf("缓存命中省") === 0 ? " s-save" : "";
+          return '<div class="s' + cls + '">' + escapeHtml(line) + "</div>";
+        }).join(""),
         miss: !priced,
       },
     ];
@@ -998,30 +1097,170 @@
       const vhtml = c.miss
         ? '<div class="v">' + na("没读到") + "</div>"
         : '<div class="v" title="' + escapeHtml(String(c.v)) + '">' + escapeHtml(String(c.v)) + "</div>";
+      const shtml = c.sHtml
+        ? c.sHtml
+        : (c.s ? '<div class="s">' + escapeHtml(c.s) + "</div>" : "");
       return (
-        '<div class="metric">' +
+        '<div class="metric' + (c.cache ? " is-cache" : "") + '">' +
         '<div class="k">' + escapeHtml(c.k) + "</div>" +
         vhtml +
-        (c.s ? '<div class="s">' + escapeHtml(c.s) + "</div>" : "") +
+        shtml +
         "</div>"
       );
     }).join("");
     if (noteEl) {
+      const bits = [];
       if (missingCount) {
-        const names = Object.keys(missingModels);
-        const extra = names.length ? "（" + names.join("、") + "）" : "";
-        noteEl.textContent = missingCount + " 个会话模型没读到价格，未计入" + extra + "。默认按闲时 / 标准官方价，本地记录未区分高峰。";
-      } else if (priced) {
-        noteEl.textContent = "官方价按配置里已核对的按量单价估算，默认闲时 / 标准价，本地记录未区分高峰。";
-      } else {
-        noteEl.textContent = "";
+        const extra = missingModels.length ? "（" + missingModels.join("、") + "）" : "";
+        bits.push((isFilter ? "筛选范围内 " : "") + missingCount + " 个模型没读到价格，未计入" + extra + "。");
       }
+      if (periodNote) bits.push(periodNote);
+      else if (priced) bits.push("官方价按每次调用的北京时间区分 DeepSeek 高峰和闲时；没有高峰价的模型用标准价。");
+      if (saved != null) bits.push("缓存命中省下的费用 = 这批命中 token 若按未命中输入单价计，会多出的差额。只统计已读到价格的调用。");
+      if (isFilter) bits.push("上面数字是当前筛选结果，不是全部会话。");
+      noteEl.textContent = bits.join(" ");
     }
   }
 
-  function fillSessions(list) {
+  function renderSessionChart() {
+    const svg = $("session-chart");
+    const empty = $("session-chart-empty");
+    const tip = $("session-chart-tip");
+    const legend = $("session-chart-legend");
+    const box = $("session-chart-box");
+    if (!svg || !box) return;
+    const daysAll = ((state.sessionTimeline || {}).by_day) || [];
+    const days = daysAll.filter((d) => inRange(d.day, state.sessionChartRange));
+    const metric = state.sessionChartMetric || "tokens";
+    const axis = cssVar("--chart-axis", "#94A3B8");
+    const gridC = cssVar("--chart-grid", "#E2E8F0");
+    let SERIES;
+    if (metric === "credit") {
+      SERIES = [{ key: "credit", label: "积分", color: cssVar("--brand", "#22c55e"), cls: "cache" }];
+    } else if (metric === "official") {
+      SERIES = [
+        { key: "official_cny_peak", label: "高峰", color: cssVar("--amber", "#d97706"), cls: "output" },
+        { key: "official_cny_offpeak", label: "闲时", color: cssVar("--series-input", "#0d9488"), cls: "input" },
+        { key: "official_cny_standard", label: "标准价", color: cssVar("--series-calls", "#64748b"), cls: "calls" },
+      ];
+    } else {
+      SERIES = series();
+    }
+    legend.innerHTML = SERIES.map((s) =>
+      '<span><i class="swatch swatch-' + s.cls + '"></i>' + escapeHtml(s.label) + "</span>"
+    ).join("") +
+      (metric === "official"
+        ? '<span><i class="swatch swatch-cache"></i>缓存命中省下（提示里）</span>'
+        : "");
+
+    if (!days.length) {
+      svg.innerHTML = "";
+      empty.hidden = false;
+      empty.innerHTML = '<p class="empty-title">没读到按日用量</p><p class="empty-desc">该时间段没有按日的用量数据。</p>';
+      if (tip) tip.hidden = true;
+      return;
+    }
+    empty.hidden = true;
+    const W = Math.max(box.clientWidth || 720, 480);
+    const H = Math.max(box.clientHeight || 300, 240);
+    const pad = { l: 56, r: 16, t: 10, b: 36 };
+    const innerW = W - pad.l - pad.r;
+    const innerH = H - pad.t - pad.b;
+    const stackOf = (d) => SERIES.reduce((a, s) => a + Number(d[s.key] || 0), 0);
+    const maxV = niceMax(Math.max(0, ...days.map(stackOf)));
+    const n = days.length;
+    const slot = innerW / n;
+    const bw = Math.min(36, Math.max(6, slot * 0.45));
+    const xAt = (i) => pad.l + i * slot + (slot - bw) / 2;
+    const yV = (v) => pad.t + innerH - (maxV ? (v / maxV) * innerH : 0);
+    const ticks = 4;
+    let grid = "";
+    const tickFmt = metric === "official" ? (v) => (v ? fmtCny(v) : "¥ 0") : (v) => (metric === "credit" ? fmt(v, 1) : compact(v));
+    for (let i = 0; i <= ticks; i++) {
+      const v = maxV * (i / ticks);
+      const y = yV(v);
+      grid +=
+        '<line x1="' + pad.l + '" x2="' + (W - pad.r) + '" y1="' + y + '" y2="' + y +
+        '" stroke="' + gridC + '" stroke-width="1"/>' +
+        '<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="' + axis +
+        '" font-size="11" font-family="ui-monospace, monospace">' +
+        escapeHtml(String(tickFmt(v))) + "</text>";
+    }
+    let bars = "";
+    days.forEach((d, i) => {
+      const x = xAt(i);
+      let y = pad.t + innerH;
+      SERIES.forEach((s) => {
+        const v = Number(d[s.key] || 0);
+        const h = maxV ? (v / maxV) * innerH : 0;
+        if (h <= 0) return;
+        y -= h;
+        bars +=
+          '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+          '" height="' + Math.max(h, 0.5).toFixed(1) + '" fill="' + s.color +
+          '" rx="2" data-i="' + i + '"/>';
+      });
+      const cx = x + bw / 2;
+      const label = (d.day || "").slice(5);
+      if (n <= 16 || i % Math.ceil(n / 12) === 0 || i === n - 1) {
+        bars +=
+          '<text x="' + cx.toFixed(1) + '" y="' + (H - 12) + '" text-anchor="middle" fill="' + axis +
+          '" font-size="11">' + escapeHtml(label) + "</text>";
+      }
+    });
+    const hitboxes = days.map((d, i) => {
+      const x = pad.l + i * (innerW / n);
+      return (
+        '<rect class="hit" data-i="' + i + '" x="' + x.toFixed(1) + '" y="' + pad.t +
+        '" width="' + (innerW / n).toFixed(1) + '" height="' + innerH +
+        '" fill="transparent"/>'
+      );
+    }).join("");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.innerHTML = grid + bars + hitboxes;
+    svg.onmousemove = (ev) => {
+      if (!tip) return;
+      const el = ev.target;
+      const idx = el && el.getAttribute && el.getAttribute("data-i");
+      if (idx == null) { tip.hidden = true; return; }
+      const d = days[Number(idx)];
+      if (!d) { tip.hidden = true; return; }
+      const rows = SERIES.map((s) =>
+        "<div>" + escapeHtml(s.label) + "　<b>" +
+        escapeHtml(metric === "official" ? (fmtCny(d[s.key] || 0) || "¥ 0") : fmt(d[s.key] || 0, metric === "credit" ? 2 : 0)) +
+        "</b></div>"
+      ).join("");
+      const extra =
+        "<div>缓存命中　<b>" + escapeHtml(fmt(d.cache_hit_tokens || 0, 0)) +
+        (d.cache_hit_rate != null ? "（" + pct(d.cache_hit_rate) + "）" : "") + "</b></div>" +
+        (d.cache_hit_saved
+          ? "<div>缓存命中省　<b>" + escapeHtml(fmtCny(d.cache_hit_saved)) + "</b></div>"
+          : "") +
+        "<div>调用　<b>" + escapeHtml(fmt(d.calls || 0, 0)) + "</b></div>";
+      tip.innerHTML = "<b>" + escapeHtml(d.day) + "</b>" + rows + extra;
+      tip.hidden = false;
+      const rect = box.getBoundingClientRect();
+      let left = ev.clientX - rect.left + 12;
+      let top = ev.clientY - rect.top + 12;
+      if (left + 200 > rect.width) left = ev.clientX - rect.left - 200;
+      if (top + 160 > rect.height) top = ev.clientY - rect.top - 150;
+      tip.style.left = left + "px";
+      tip.style.top = top + "px";
+    };
+    svg.onmouseleave = () => { if (tip) tip.hidden = true; };
+  }
+
+  function fillSessions(payload) {
+    const list = Array.isArray(payload) ? payload : (payload && payload.sessions) || [];
     state.sessions = list || [];
+    if (payload && !Array.isArray(payload)) {
+      state.sessionTotals = { usage: payload.usage_totals || {}, official: payload.official_totals || {} };
+      state.sessionTimeline = payload.timeline || { by_day: [] };
+      if (payload.credit_rules) state.creditRules = payload.credit_rules;
+    }
     renderSessions();
+    renderSessionChart();
   }
 
   function modelTags(models) {
@@ -1034,45 +1273,145 @@
       .join("");
   }
 
+  function lastCallLabel(s) {
+    const u = s.usage || {};
+    if (u.last_call_at) {
+      // "2026-11-12 17:47:29" → 11-12 17:47
+      const m = String(u.last_call_at).match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+      if (m) return { short: m[2] + "-" + m[3] + " " + m[4] + ":" + m[5], full: u.last_call_at + "（北京时间）" };
+      return { short: u.last_call_at, full: u.last_call_at + "（北京时间）" };
+    }
+    return { short: when(s.updated_at || s.last_activity_at), full: whenFull(s.updated_at || s.last_activity_at) };
+  }
+
+  function renderCallsPane(sid) {
+    const info = state.sessionCalls[sid] || {};
+    if (info.loading) return '<p class="calls-loading">正在读取每次调用的时间……</p>';
+    if (info.error) return '<p class="calls-error">' + escapeHtml(info.error) + "</p>";
+    const calls = info.calls || [];
+    if (!calls.length) return '<p class="calls-error">这个会话没有读到带用量的调用记录。</p>';
+    const rows = calls.map((c) => {
+      const saved = c.cache_hit_saved != null && c.official_cny_status === "ok"
+        ? '<span class="saved">' + escapeHtml(fmtCny(c.cache_hit_saved)) + "</span>"
+        : na("—");
+      return (
+        "<tr>" +
+        "<td title='" + escapeHtml((c.time_local || "") + " 北京时间") + "'>" + escapeHtml(c.time_local || "—") + periodTag(c.period) + "</td>" +
+        "<td class='clip' title='" + escapeHtml(c.model || "") + "'>" + escapeHtml(c.model || "—") + "</td>" +
+        '<td class="num">' + escapeHtml(fmt(c.credit || 0, 2)) + "</td>" +
+        '<td class="num">' + escapeHtml(fmt(c.uncached_input || 0, 0)) + "</td>" +
+        '<td class="num">' + cacheCell(c.cache_hit_tokens, c.cache_hit_rate) + "</td>" +
+        '<td class="num">' + escapeHtml(fmt(c.completion_tokens || 0, 0)) + "</td>" +
+        '<td class="num">' + officialCell(c) + "</td>" +
+        '<td class="num">' + saved + "</td>" +
+        "</tr>"
+      );
+    }).join("");
+    const more = (info.total || 0) > calls.length
+      ? '<tr class="more-row"><td colspan="8">已显示 ' + calls.length + " / " + info.total +
+        ' 次。点击「再加载」看更早的调用。<button type="button" class="btn-ghost" data-more="' +
+        escapeHtml(sid) + '">再加载</button></td></tr>'
+      : "";
+    return (
+      '<div class="table-wrap"><table class="calls-table">' +
+      "<thead><tr>" +
+      "<th>调用时间（北京）</th><th>模型</th><th class='num'>积分</th>" +
+      "<th class='num'>未命中输入</th><th class='num'>缓存命中</th><th class='num'>输出</th>" +
+      "<th class='num'>官方价</th><th class='num'>缓存省下</th>" +
+      "</tr></thead><tbody>" + rows + more + "</tbody></table></div>"
+    );
+  }
+
+  async function loadSessionCalls(sid, more) {
+    if (!sid) return;
+    const cur = state.sessionCalls[sid] || { calls: [], total: 0, offset: 0 };
+    if (cur.loading) return;
+    if (!more && cur.calls && cur.calls.length) {
+      renderSessions();
+      return;
+    }
+    const offset = more ? (cur.calls || []).length : 0;
+    state.sessionCalls[sid] = Object.assign({}, cur, { loading: true, error: "" });
+    renderSessions();
+    try {
+      const obj = await get("/api/sessions/" + encodeURIComponent(sid) + "/calls?limit=200&offset=" + offset);
+      if (!obj || obj.ok === false) {
+        state.sessionCalls[sid] = Object.assign({}, cur, { loading: false, error: (obj && obj.error) || "读取失败" });
+      } else {
+        const prev = more ? (cur.calls || []) : [];
+        state.sessionCalls[sid] = {
+          loading: false,
+          error: "",
+          calls: prev.concat(obj.calls || []),
+          total: obj.total || 0,
+          offset: obj.offset || 0,
+        };
+      }
+    } catch (e) {
+      state.sessionCalls[sid] = Object.assign({}, cur, { loading: false, error: "读取失败" });
+    }
+    renderSessions();
+  }
+
   function renderSessions() {
-    const q = ($("session-filter").value || "").trim().toLowerCase();
+    const filterEl = $("session-filter");
+    const q = ((filterEl && filterEl.value) || "").trim().toLowerCase();
     const rows = state.sessions.filter((s) => {
       if (!q) return true;
       const blob = [s.title, s.model, s.display_id, (s.usage && s.usage.user_id) || ""].join(" ").toLowerCase();
       return blob.indexOf(q) >= 0;
     });
     const tb = $("session-table").querySelector("tbody");
+    const isFilter = !!q;
     if (!rows.length) {
       const emptyTitle = q ? "没有符合条件的会话" : "还没有会话";
       const emptyDesc = q ? "试试别的标题、模型或账号。" : "这个数据目录里还没有读到会话。";
-      tb.innerHTML = emptyRow(8, emptyTitle, emptyDesc);
+      tb.innerHTML = emptyRow(9, emptyTitle, emptyDesc);
       $("session-page").textContent = "0 条";
-      renderSessionSummary([]);
+      renderSessionSummary([], isFilter);
       return;
     }
-    renderSessionSummary(rows);
+    renderSessionSummary(rows, isFilter);
     tb.innerHTML = rows
       .map((s) => {
         const u = s.usage || {};
-        const hit = u.prompt_tokens ? pct(u.cache_hit_tokens / u.prompt_tokens) : null;
+        const hitRate = u.cache_hit_rate != null
+          ? u.cache_hit_rate
+          : (u.prompt_tokens ? Math.min(u.cache_hit_tokens || 0, u.prompt_tokens) / u.prompt_tokens : null);
         const models = u.model_counts ? Object.keys(u.model_counts).join(", ") : s.model;
         const open = state.openSession === s.id;
+        const whenL = lastCallLabel(s);
+        const savedLine = (u.cache_hit_saved != null && (u.official_cny_status === "ok" || u.official_cny_status === "partial"))
+          ? "缓存命中省 " + fmtCny(u.cache_hit_saved)
+          : "";
+        const peakLine = [
+          u.official_cny_peak ? "高峰 " + fmtCny(u.official_cny_peak) : "",
+          u.official_cny_offpeak ? "闲时 " + fmtCny(u.official_cny_offpeak) : "",
+          u.official_cny_standard ? "标准 " + fmtCny(u.official_cny_standard) : "",
+        ].filter(Boolean).join(" · ");
+        const callsHtml = open ? renderCallsPane(s.id) : "";
+        const first = u.first_call_at ? "首次 " + u.first_call_at : "";
         const detail =
           "<tr class='session-detail' data-for='" + escapeHtml(s.id) + "'" + (open ? "" : " hidden") + ">" +
-          "<td colspan='8'><div class='detail-grid'>" +
+          "<td colspan='9'><div class='detail-grid'>" +
           "<div><div class='k'>调用</div><div class='v'>" + escapeHtml(fmt(u.calls || 0, 0)) + "</div></div>" +
           "<div><div class='k'>积分</div><div class='v'>" + escapeHtml(fmt(u.credit || 0, 2)) + "</div></div>" +
           "<div><div class='k'>输入 token</div><div class='v'>" + escapeHtml(fmt(u.prompt_tokens || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(u.completion_tokens || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>缓存命中</div><div class='v'>" + escapeHtml(fmt(u.cache_hit_tokens || 0, 0)) + "</div></div>" +
+          "<div><div class='k'>缓存命中</div><div class='v'>" + escapeHtml(fmt(u.cache_hit_tokens || 0, 0)) +
+            (hitRate == null ? "" : "（" + escapeHtml(pct(hitRate)) + "）") + "</div></div>" +
           "<div><div class='k'>未命中输入</div><div class='v'>" + escapeHtml(fmt(u.uncached_input || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>思考 token</div><div class='v'>" + escapeHtml(fmt(u.thinking_tokens || 0, 0)) + "</div></div>" +
-          "<div><div class='k'>缓存命中率</div><div class='v'>" + (hit == null ? na("没读到") : escapeHtml(hit)) + "</div></div>" +
+          "<div><div class='k'>输出 token</div><div class='v'>" + escapeHtml(fmt(u.completion_tokens || 0, 0)) + "</div></div>" +
           "<div><div class='k'>官方价</div><div class='v'>" + officialCell(u) + "</div></div>" +
-          "<div><div class='k'>账号</div><div class='v'>" + escapeHtml(s.display_id || "—") + "</div></div>" +
+          "<div><div class='k'>缓存命中省</div><div class='v'>" + (savedLine ? '<span class="saved">' + escapeHtml(fmtCny(u.cache_hit_saved)) + "</span>" : na("没读到")) + "</div></div>" +
+          "<div><div class='k'>首次调用</div><div class='v'>" + escapeHtml(u.first_call_at || "—") + "</div></div>" +
+          "<div><div class='k'>最近调用</div><div class='v'>" + escapeHtml(u.last_call_at || "—") + "</div></div>" +
           "</div>" +
-          "<p class='footnote'>不含对话正文。模型：" + escapeHtml(models || "—") +
-          (u.official_cny_note ? "。" + escapeHtml(u.official_cny_note) : "") + "</p>" +
+          (peakLine ? "<p class='footnote tight'>" + escapeHtml(peakLine) + "</p>" : "") +
+          "<p class='footnote'>不含对话正文。时间是北京时间。模型：" + escapeHtml(models || "—") +
+          (u.official_cny_note ? "。" + escapeHtml(u.official_cny_note) : "") +
+          (u.wb_rule_expected_note ? " " + escapeHtml(u.wb_rule_expected_note) : "") +
+          (first ? "。" + escapeHtml(first) : "") + "</p>" +
+          callsHtml +
           "</td></tr>";
         return (
           "<tr class='session-row" + (open ? " is-open" : "") + "' data-id='" + escapeHtml(s.id) + "'>" +
@@ -1081,22 +1420,79 @@
           "<td class='clip' title='" + escapeHtml(s.display_id || "—") + "'>" + escapeHtml(s.display_id || "—") + "</td>" +
           '<td class="num">' + fmt(u.calls || 0, 0) + "</td>" +
           '<td class="num">' + fmt(u.credit || 0, 2) + "</td>" +
-          '<td class="num" title="输入 ' + fmt(u.prompt_tokens || 0, 0) + " / 输出 " + fmt(u.completion_tokens || 0, 0) + '">' + fmt(u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0)), 0) + "</td>" +
+          '<td class="num" title="输入 ' + fmt(u.prompt_tokens || 0, 0) + " / 输出 " + fmt(u.completion_tokens || 0, 0) + '">' +
+            fmt(u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0)), 0) + "</td>" +
+          '<td class="num cache">' + cacheCell(u.cache_hit_tokens, hitRate) + "</td>" +
           '<td class="num">' + officialCell(u) + "</td>" +
-          "<td class='date' title='" + escapeHtml(whenFull(s.updated_at || s.last_activity_at)) + "'>" + escapeHtml(when(s.updated_at || s.last_activity_at)) + "</td>" +
+          "<td class='date' title='" + escapeHtml(whenL.full) + "'>" + escapeHtml(whenL.short) + "</td>" +
           "</tr>" +
           detail
         );
       })
       .join("");
-    $("session-page").textContent = "本页 " + rows.length + " 条（最多 200 条最近会话）";
+    const totalAll = (state.sessionTotals && state.sessionTotals.usage && state.sessionTotals.usage.session_count) || "";
+    $("session-page").textContent =
+      "本页 " + rows.length + " 条（最多 200 条最近会话）" +
+      (totalAll && !isFilter ? "，合计覆盖全部 " + totalAll + " 个会话" : "") +
+      (isFilter ? "，当前为筛选结果" : "");
     tb.querySelectorAll("tr.session-row").forEach((tr) => {
       tr.addEventListener("click", () => {
         const id = tr.getAttribute("data-id");
-        state.openSession = state.openSession === id ? "" : id;
+        const opening = state.openSession !== id;
+        state.openSession = opening ? id : "";
         renderSessions();
+        if (opening) loadSessionCalls(id, false);
       });
     });
+    tb.querySelectorAll("button[data-more]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        loadSessionCalls(btn.getAttribute("data-more"), true);
+      });
+    });
+  }
+
+  function fillCreditRules(rules, rates) {
+    const body = $("wb-rules-body");
+    const formula = $("wb-rules-formula");
+    const tb = $("wb-multiplier-table") && $("wb-multiplier-table").querySelector("tbody");
+    const r = rules || state.creditRules || (rates && rates.workbuddy_credit_rules) || {};
+    const mul = (r.multipliers || (rates && rates.official_multipliers) || {});
+    if (body) {
+      const summary = r.summary || [];
+      const src = r.source || mul.source || "";
+      const title = r.source_title || mul.source_title || "WorkBuddy 官方文档";
+      const at = r.retrieved_at || mul.retrieved_at || "";
+      const srcHtml = src
+        ? '<p class="rules-meta">来源：<a href="' + escapeHtml(src) + '" target="_blank" rel="noopener noreferrer">' +
+          escapeHtml(title) + "</a>" + (at ? "（取自 " + escapeHtml(at) + "）" : "") + "</p>"
+        : '<p class="rules-meta">没读到官方规则来源。</p>';
+      const list = summary.length
+        ? "<ul class='rules-list'>" + summary.map((s) => "<li>" + escapeHtml(s) + "</li>").join("") + "</ul>"
+        : "<p class='footnote'>没读到官方规则正文。</p>";
+      body.innerHTML = srcHtml + list;
+    }
+    if (formula) {
+      const st = r.exact_formula_status || "没读到";
+      const note = r.exact_formula_note || "官方未公布每百万 token 积分费率，无法按规则算出应扣积分。";
+      formula.textContent = "精确公式：" + (st === "没读到" ? "没读到。" : st + "。") + " " + note;
+    }
+    if (tb) {
+      const models = (mul.models) || {};
+      const keys = Object.keys(models);
+      if (!keys.length) {
+        tb.innerHTML = emptyRow(3, "还没有倍率", "官方「选择模型」页的倍率表还没读到。");
+      } else {
+        tb.innerHTML = keys.map((name) => {
+          const v = models[name];
+          const miss = v === "没读到" || v === "" || v == null;
+          const shown = miss ? na("没读到") : (v === 0 || v === 0.0 ? "限时免费（x0）" : "x" + v);
+          return "<tr><td>" + escapeHtml(name) + '</td><td class="num">' +
+            (miss ? shown : escapeHtml(String(shown))) + "</td><td class='note'>" +
+            (miss ? "官方未标倍率" : "数字越低消耗越少") + "</td></tr>";
+        }).join("");
+      }
+    }
   }
 
   /* ---------- 加载 ---------- */
@@ -1117,7 +1513,8 @@
       fillInfer(usage);
       fillModels(usage);
       fillPrices(usage);
-      fillSessions(sessions.sessions || []);
+      fillSessions(sessions || {});
+      fillCreditRules((sessions && sessions.credit_rules) || (usage.rates || {}).workbuddy_credit_rules, usage.rates || {});
       fillAccounts(accounts);
       await fillPreflight();
 
@@ -1167,8 +1564,20 @@
   }
   bindPills("overview-range", "overviewRange", renderTokenPage);
   bindPills("chart-range", "chartRange", renderTokenPage);
+  bindPills("session-chart-range", "sessionChartRange", renderSessionChart);
+  const metricBox = $("session-chart-metric");
+  if (metricBox) {
+    metricBox.querySelectorAll("button[data-metric]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.sessionChartMetric = btn.getAttribute("data-metric");
+        metricBox.querySelectorAll("button").forEach((b) => b.classList.toggle("is-on", b === btn));
+        renderSessionChart();
+      });
+    });
+  }
   window.addEventListener("resize", () => {
     if (state.page === "tokens") renderTokenPage();
+    if (state.page === "sessions") renderSessionChart();
   });
 
   document.querySelectorAll("[data-theme-set]").forEach((btn) => {
@@ -1180,6 +1589,7 @@
       if (!document.documentElement.getAttribute("data-theme")) {
         syncThemeButtons();
         if (state.usage) renderTokenPage();
+        if (state.page === "sessions") renderSessionChart();
       }
     };
     if (mq.addEventListener) mq.addEventListener("change", onChange);

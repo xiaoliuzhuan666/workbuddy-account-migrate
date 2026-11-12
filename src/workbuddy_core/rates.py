@@ -103,6 +103,8 @@ class RatesConfig:
             "volc_afp": self.volc_afp,
             "inference": self.inference,
             "pricing_policy": self.pricing_policy,
+            "workbuddy_credit_rules": (self.raw or {}).get("workbuddy_credit_rules") or {},
+            "deepseek_peak_windows": (self.raw or {}).get("deepseek_peak_windows") or {},
         }
 
 
