@@ -35,7 +35,7 @@ python3 scripts/webui.py
 
 然后打开终端里打印的地址（默认 http://127.0.0.1:18765/ ）。只读浏览不需要令牌；同步账号要粘贴本机令牌、二次确认，并且**先退出 WorkBuddy 客户端**（和 CLI 同一条规则）。
 
-价格对比用可编辑的 `config/model_rates.json`，数字都注明了来源和日期，没核实到的写「没读到」。完整说明见 [docs/WEBUI.md](docs/WEBUI.md)。
+价格对比用可编辑的 `config/model_rates.json`，数字都注明了来源和日期，没核实到的写「没读到」。完整说明见 [docs/WEBUI.md](docs/WEBUI.md)。开发计划见 [docs/local-webui-plan.md](docs/local-webui-plan.md)。
 
 
 跨设备迁移三步走（这是本工具的招牌场景）：
